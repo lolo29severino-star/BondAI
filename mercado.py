@@ -328,3 +328,97 @@ def volumen_periodo(V, ruedas=20, paneles=None):
                       "relativo": (mp / ruedas) / bm if bm and bm > 0 else np.nan,
                       "var": c0 / c[k] - 1 if c0 and c[k] else np.nan})
     return pd.DataFrame(filas).set_index("ticker"), fechas[ini:], hoy
+
+
+# ───────────────────────────── tasas forward ─────────────────────────────
+FWD_TIPOS = {"fija": "Tasa fija (LECAP y BONCAP)", "cer": "CER cupón cero (tasa real)", "dl": "Dólar linked (devaluación)",
+             "tesoro": "USD: Tesoro (AO27, AO28, AO29)", "bonares": "USD: Bonares (ley local)", "globales": "USD: Globales (ley NY)"}
+FWD_USD = {"tesoro": "Tesoro", "bonares": "Bonares", "globales": "Globales"}   # tipo → familia de tabla_usd
+
+
+def forwards(RP, tipo="fija", minimo=14, tabla_usd=None):
+    """Tasas forward implícitas entre vencimientos sucesivos de una curva, a partir de lo que paga cada bono.
+
+    Si con $1 de hoy un bono que vence en d1 días devuelve g1 y otro que vence en d2 días devuelve g2, comprar el largo
+    equivale a comprar el corto y reinvertir en d1 a la tasa forward: (1 + f) = (g2 / g1) ^ (30 / (d2 − d1)), mensual.
+    tipo: 'fija' (pago final / precio de LECAP y BONCAP), 'cer' (crecimiento real de los CER cupón cero), 'dl'
+    (dólar de equilibrio de cada dólar linked contra el A3500 de hoy: la forward es una devaluación mensual) o, en dólares,
+    'tesoro', 'bonares' y 'globales' (necesitan tabla_usd). Los bonos en dólares pagan cupones y los Bonares y Globales
+    amortizan, así que el plazo de cada uno es su duration de Macaulay D y lo que devuelve es g = (1 + TIR) ^ D: queda
+    (1 + f) ^ (D2 − D1) = (1 + TIR2) ^ D2 / (1 + TIR1) ^ D1, la forma habitual en el mercado.
+    Se saltean vencimientos a menos de `minimo` días del anterior, porque en tramos muy cortos cualquier ruido en el
+    precio produce una forward absurda. El primer tramo arranca hoy, así que su forward es la tasa spot."""
+    if tipo == "fija":
+        df = pd.concat([RP["lecap"], RP["boncap"]])
+        df = df[df["pago_final"].notna()]                      # los BONTE con cupones no tienen un único pago
+        g, spot = df["pago_final"] / df["precio"], df["tem"]
+    elif tipo == "cer":
+        df = RP["cer"][RP["cer"].index.isin({c[0] for c in P.CERZ})]
+        g = (1 + df["tir_real"]) ** (df["dias"] / 365)
+        spot = (1 + df["tir_real"]) ** (30 / 365) - 1
+    elif tipo in FWD_USD:
+        df = tabla_usd[tabla_usd["familia"] == FWD_USD[tipo]].copy()
+        mac = df["md"] * (1 + df["tir"])                       # duration de Macaulay, en años
+        usd = B.universo_usd()
+        df["vence"] = [usd[t]["venc"] for t in df.index]
+        df["dias"] = mac * 365
+        g, spot = (1 + df["tir"]) ** mac, (1 + df["tir"]) ** (30 / 365) - 1
+    else:
+        df = RP["dl"]
+        g, spot = df["dolar_be"] / RP["tc_hoy"], df["deval_mensual"]
+    t = pd.DataFrame({"vence": df["vence"], "dias": df["dias"], "g": g, "spot": spot}).dropna().sort_values("dias")
+    filas, d0, g0, desde = [], 0, 1.0, "hoy"
+    for tk, r in t[t["dias"] >= minimo].iterrows():
+        if r["dias"] - d0 < minimo:
+            continue
+        f = (r["g"] / g0) ** (30 / (r["dias"] - d0)) - 1
+        filas.append({"tramo": f"{desde} → {tk}", "desde": d0, "hasta": r["dias"], "dias": r["dias"] - d0, "vence": r["vence"],
+                      "fwd_mensual": f, "fwd_anual": (1 + f) ** (365 / 30) - 1, "spot_mensual": r["spot"],
+                      "spot_anual": (1 + r["spot"]) ** (365 / 30) - 1, "dif_pb": (f - r["spot"]) * 1e4})
+        d0, g0, desde = r["dias"], r["g"], tk
+    if not filas:
+        return pd.DataFrame()
+    out = pd.DataFrame(filas).set_index("tramo")
+    out["dif_anual_pb"] = (out["fwd_anual"] - out["spot_anual"]) * 1e4
+    return out
+
+
+def forwards_bootstrap(tabla_usd, liq, tickers=("AO27", "AO28", "AO29")):
+    """Bootstrapping exacto: curva cupón cero con forward constante entre vencimientos sucesivos.
+
+    Ordena los bonos por vencimiento. El primero fija la tasa de hoy a su vencimiento; para cada bono siguiente, sus flujos
+    anteriores al vencimiento previo se descuentan con la curva ya armada y se busca (brentq) la forward del nuevo tramo
+    que hace que el valor presente iguale el precio. Sirve para bonos que devuelven el capital al final (AO27, AO28, AO29);
+    con bonos que amortizan en cuotas (Bonares, Globales) el último tramo pesa poco en el precio y da forwards absurdas."""
+    from scipy.optimize import brentq
+    usd = B.universo_usd()
+    nodos, filas, desde = [], [], "hoy"                         # nodos: (fin del tramo en años, forward anual)
+
+    def descuento(t, f_nuevo):
+        v, t0 = 1.0, 0.0
+        for tf, f in nodos:
+            if t <= t0:
+                break
+            v *= (1 + f) ** -(min(t, tf) - t0); t0 = tf
+        return v * (1 + f_nuevo) ** -(t - t0) if t > t0 else v
+
+    for venc, tk in sorted((usd[t]["venc"], t) for t in tickers if t in tabla_usd.index):
+        T = (venc - liq).days / 365
+        t_prev = nodos[-1][0] if nodos else 0.0
+        fl = [((f - liq).days / 365, c + a) for f, c, a in usd[tk]["flujos"] if f > liq]
+        precio = float(tabla_usd.loc[tk, "precio"])
+        f = brentq(lambda x: sum(m * descuento(t, x) for t, m in fl) - precio, -0.5, 3.0)
+        nodos.append((T, f))
+        filas.append({"tramo": f"{desde} → {tk}", "desde_anios": t_prev, "hasta_anios": T, "fwd_exacta": f,
+                      "cero": descuento(T, f) ** (-1 / T) - 1})
+        desde = tk
+    return pd.DataFrame(filas).set_index("tramo") if filas else pd.DataFrame()
+
+
+def forward_curva(curva, hasta_dias, paso=5):
+    """Forward a 30 días a lo largo del plazo según una curva ajustada (función años → TIREA): la versión suavizada."""
+    filas = []
+    for d in range(15, int(hasta_dias) - 29, paso):
+        t1, t2 = d / 365, (d + 30) / 365
+        filas.append({"dias": d, "fwd_mensual": (1 + curva(t2)) ** t2 / (1 + curva(t1)) ** t1 - 1})
+    return pd.DataFrame(filas)

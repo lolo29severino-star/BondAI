@@ -59,15 +59,20 @@ def cargar_dolares(en_vivo):
     return DL.cargar_dolares(usar_api=en_vivo)
 
 
-@st.cache_data(show_spinner="Entrenando y validando los modelos de Machine Learning…")
-def modelos(en_vivo):
+# Bonos en pesos: el cálculo tarda unos 15 segundos, así que se guarda para cada combinación de supuestos.
+# cache_resource (y no cache_data) porque el resultado incluye funciones (las curvas ajustadas), que no se pueden copiar.
+@st.cache_resource(ttl=900, show_spinner="Calculando los 55 bonos en pesos…")
+def calcular_pesos(en_vivo, plazo, precio, tamar, infl, dev):
     d = cargar(en_vivo)
-    X, y = B.construir_features(d["macro"])
-    bt = B.validacion_temporal(X, y, h=1)
-    mae = pd.DataFrame({f"h={h}": B.metricas_error(B.validacion_temporal(X, y, h=h))["MAE (pp)"] for h in (1, 3, 6)})
-    pron = B.pronostico_directo(X, y)
-    return X, y, bt, mae, pron
+    return P.calcular(cargar_pesos(en_vivo), plazo, precio, tamar, infl, ipc_publicado=d["macro"]["ipc"].dropna().to_dict(),
+                      rem_mensual=d["rem_mensual"]["mediana"].dropna().to_dict(), dev=dev)
 
+
+@st.cache_resource(ttl=900, show_spinner="Comparando contra el cierre anterior…")
+def variacion_mercado(en_vivo, grupo, tamar, infl, duales):
+    d = cargar(en_vivo)
+    return M.variacion(grupo, cargar_paneles(en_vivo), cargar_pesos(en_vivo), tamar=tamar, infl=infl, duales=duales,
+                       ipc_publicado=d["macro"]["ipc"].dropna().to_dict(), rem_mensual=d["rem_mensual"]["mediana"].dropna().to_dict())
 
 
 # colores de las variaciones: (factor para llevar a decimal, piso de la escala, invertir el signo)
@@ -120,11 +125,12 @@ moneda = st.sidebar.radio("Valuar los bonos en dólares en", ["mep", "ccl"], hor
 SUF = "C" if moneda == "ccl" else "D"
 if st.sidebar.button("Actualizar datos ahora"):
     st.cache_data.clear()
+    calcular_pesos.clear(); variacion_mercado.clear()
 
 
 def borrar_precios():
-    """Borra de la memoria solo los precios y tasas (no el volumen ni los modelos, que tardan en recalcularse)."""
-    for f in (cargar, calcular, cargar_pesos, cargar_paneles, cargar_dolares):
+    """Borra de la memoria solo los precios y tasas (no el volumen, que tarda en volver a bajarse)."""
+    for f in (cargar, calcular, cargar_pesos, cargar_paneles, cargar_dolares, calcular_pesos, variacion_mercado):
         f.clear()
 
 
@@ -164,11 +170,11 @@ c2.metric(f"Breakeven {jun.name}/{jun['cer']}", f"{jun['be_mensual']:.2%} mensua
 c3.metric("REM próximo mes", f"{D['rem_mensual']['mediana'].iloc[0]:.2f}%", f"{D['rem_mensual'].index[0]}", delta_color="off")
 c4.metric("Último IPC", f"{D['macro']['ipc'].dropna().iloc[-1]:.1f}%", D["macro"]["ipc"].dropna().index[-1], delta_color="off")
 
-tab1, tabP, tabV, tabO, tabF, tabD, tabL, tab2, tab3, tab4 = st.tabs(["Curva en dólares", "Tesoro en pesos", "Variación diaria", "Volumen",
-                                                                      "Flujos de fondos", "Dólares", "Licitaciones",
-                                                                      "Inflación breakeven", "Pronóstico con ML", "Resumen con IA"])
+tab1, tabP, tabW, tabV, tabO, tabF, tabD, tabL, tab2, tab4 = st.tabs(["Curva en dólares", "Tesoro en pesos", "Tasas forward", "Variación diaria", "Volumen",
+                                                                "Flujos de fondos", "Dólares", "Licitaciones",
+                                                                "Inflación breakeven", "Resumen con IA"])
 
-# ── 1. curva USD + Monte Carlo ──
+# ── 1. curva USD ──
 with tab1:
     izq, der = st.columns([1.2, 1])
     with izq:
@@ -194,27 +200,6 @@ with tab1:
         ax.plot(g, B.nelson_siegel(g, *tabla_usd.attrs["Nueva York"]) * 100, color=B.COLORES["global"], alpha=.6)
         ax.set_xlabel("Duration modificada"); ax.set_ylabel("TIR %"); ax.legend(fontsize=8)
         st.pyplot(fig)
-
-    st.subheader("Simulador Monte Carlo")
-    a, b, c, d_, e = st.columns(5)
-    bono = a.selectbox("Bono", tabla_usd.index.tolist(), index=tabla_usd.index.tolist().index("AE38"))
-    meses = b.slider("Horizonte (meses)", 1, 24, 6)
-    tir0 = float(tabla_usd.loc[bono, "tir"])
-    objetivo = c.number_input("TIR objetivo %", value=round(tir0 * 100, 2), step=0.25) / 100
-    sigma = d_.number_input("Volatilidad TIR (pb/año)", value=164, step=10) / 1e4
-    kappa = e.number_input("Reversión κ", value=1.5, step=0.25)
-    usd = B.universo_usd()
-    salida = min(B.sumar_meses(liq_usd, meses), usd[bono]["venc"] - timedelta(days=1))
-    r, _ = B.monte_carlo_bono(usd[bono], liq_usd, tabla_usd.loc[bono, "precio"], salida, tir0, objetivo, kappa, sigma)
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Retorno esperado", f"{r.mean():.2%}")
-    m2.metric("Percentil 5", f"{np.percentile(r, 5):.2%}")
-    m3.metric("Percentil 95", f"{np.percentile(r, 95):.2%}")
-    m4.metric("Prob. retorno > 0", f"{(r > 0).mean():.0%}")
-    fig, ax = plt.subplots(figsize=(10, 2.6))
-    ax.hist(r * 100, bins=60, color=B.COLORES["bonar"], alpha=.8); ax.axvline(0, color="black", lw=1)
-    ax.set_xlabel(f"Retorno total en USD de {bono} al {salida:%d/%m/%Y}, %")
-    st.pyplot(fig)
 
 
 # ── gráficos comunes ──
@@ -326,7 +311,7 @@ with tabP:
                              help="Para dólar linked y TMVE8. Vacío = la devaluación implícita en la curva dólar linked.")
     dev_sup = None if dev_in is None else dev_in / 100
     IPC_PUB, REM_MED = D["macro"]["ipc"].dropna().to_dict(), rem_med.to_dict()
-    RP = P.calcular(DP, plazo_p, precio_p, tamar_sup, infl_sup, ipc_publicado=IPC_PUB, rem_mensual=REM_MED, dev=dev_sup)
+    RP = calcular_pesos(en_vivo, plazo_p, precio_p, tamar_sup, infl_sup, dev_sup)
     n_inst = sum(len(RP[k]) for k, _, _ in P.TIPOS)
     q6.metric("Instrumentos", n_inst)
     st.caption(f"BYMA Open Data · liquidación {RP['liq']:%d/%m/%Y} · A3500 {RP['tc_fecha']:%d/%m/%Y} · CER publicado hasta {RP['cer_ultimo']:%d/%m/%Y} · fuentes: "
@@ -430,6 +415,97 @@ with tabP:
                 st.pyplot(grafico_pesos(df[df["dias"] >= 15], "deval_mensual", None, "#1baf7a", "Devaluación mensual implícita"))
             st.caption(NOTAS[k])
 
+# ── Tasas forward implícitas en las curvas en pesos y en dólares ──
+with tabW:
+    st.caption("La tasa forward es la tasa que el mercado ya fija hoy para un período futuro. Si una LECAP vence en 3 meses y otra en 6, "
+               "comprar la de 6 tiene que rendir lo mismo que comprar la de 3 y renovar: la tasa de esa renovación es la forward entre el mes 3 y el 6. "
+               "En dólares es igual: comprar el AO28 tiene que rendir lo mismo que comprar el AO27 y reinvertir hasta el vencimiento del AO28.")
+    w1, w2 = st.columns([2.4, 1])
+    tipo_w = w1.radio("Curva", list(M.FWD_TIPOS), horizontal=True, format_func=M.FWD_TIPOS.get)
+    en_usd = tipo_w in M.FWD_USD
+    if en_usd:
+        minimo_w = w2.selectbox("Tramo mínimo", [90, 180, 365], format_func={90: "3 meses", 180: "6 meses", 365: "1 año"}.get, key="min_w_usd",
+                                help="Medido en duration: se saltean bonos con una duration muy parecida a la del anterior.")
+    else:
+        minimo_w = w2.selectbox("Tramo mínimo", [14, 30, 60], format_func=lambda d: f"{d} días", key="min_w_pesos",
+                                help="Se saltean vencimientos más cercanos que esto al anterior: en tramos muy cortos cualquier ruido en el precio da una forward absurda.")
+    FW = M.forwards(RP, tipo_w, minimo_w, tabla_usd)
+    if len(FW) < 2:
+        st.info("No hay suficientes vencimientos para calcular forwards con ese tramo mínimo.")
+    elif en_usd:
+        alta, baja = FW["fwd_anual"].idxmax(), FW["fwd_anual"].idxmin()
+        u1, u2, u3, u4 = st.columns(4)
+        u1.metric("Primer tramo (= TIR)", f"{FW['fwd_anual'].iloc[0]:.2%}", f"anual en USD · {FW.index[0]}", delta_color="off")
+        u2.metric("Forward más alta", f"{FW.loc[alta, 'fwd_anual']:.2%}", alta, delta_color="off")
+        u3.metric("Forward más baja", f"{FW.loc[baja, 'fwd_anual']:.2%}", baja, delta_color="off")
+        u4.metric("Último tramo", f"{FW['fwd_anual'].iloc[-1]:.2%}", f"{(FW['fwd_anual'].iloc[-1] - FW['fwd_anual'].iloc[0]) * 1e4:+.0f} pb vs el primero", delta_color="off")
+        fig, ax = plt.subplots(figsize=(11, 4.2))
+        for i, (tr, r) in enumerate(FW.iterrows()):
+            ax.hlines(r["fwd_anual"] * 100, r["desde"] / 365, r["hasta"] / 365, color=AZUL, lw=3, label="Forward de cada tramo" if i == 0 else None)
+        ax.scatter(FW["hasta"] / 365, FW["spot_anual"] * 100, color=GRIS, s=26, zorder=3, label="TIR de cada bono (de hoy a su vencimiento)")
+        etiquetar(ax, FW["hasta"] / 365, FW["spot_anual"] * 100, [t.split(" → ")[1] for t in FW.index])
+        ax.set_xlabel("Duration (años)"); ax.set_ylabel("Tasa anual en dólares (%)")
+        ax.grid(alpha=.25); ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, frameon=False)
+        fig.tight_layout(); st.pyplot(fig)
+        st.caption(f"Precios en dólar {'cable' if moneda == 'ccl' else 'MEP'} (se cambia en la barra lateral). Cada barra azul es la tasa anual en dólares "
+                   "que el mercado ya fija para ese tramo; los puntos grises, la TIR de cada bono. Si las barras quedan arriba de los puntos, la curva tiene pendiente positiva.")
+        T = FW[["vence", "desde", "hasta", "dias", "fwd_anual", "spot_anual", "dif_anual_pb"]].copy()
+        T[["desde", "hasta", "dias"]] = T[["desde", "hasta", "dias"]] / 365
+        fmt = {"vence": "{:%d/%m/%Y}", "desde": "{:.2f}", "hasta": "{:.2f}", "dias": "{:.2f}", "fwd_anual": "{:.2%}", "spot_anual": "{:.2%}", "dif_anual_pb": "{:+.0f}"}
+        nom = {"vence": "Vence", "desde": "Desde (años)", "hasta": "Hasta (años)", "dias": "Años del tramo", "fwd_anual": "Forward anual",
+               "spot_anual": "TIR del bono", "dif_anual_pb": "Forward − TIR (pb)"}
+        if tipo_w == "tesoro":
+            BX = M.forwards_bootstrap(tabla_usd, liq_usd, [t.split(" → ")[1] for t in FW.index])
+            T["exacta"] = BX["fwd_exacta"].reindex(T.index).values if len(BX) else np.nan
+            fmt["exacta"], nom["exacta"] = "{:.2%}", "Forward exacta (bootstrapping)"
+        mostrar(T, fmt, nom)
+        notas_u = {"tesoro": "Los AO27, AO28 y AO29 pagan un cupón mensual del 6% y devuelven todo el capital al vencimiento. "
+                             "Fórmula: (1 + forward) ^ (D2 − D1) = (1 + TIR2) ^ D2 / (1 + TIR1) ^ D1, con D la duration de cada bono. "
+                             "Como no amortizan, se puede verificar con el bootstrapping exacto (curva cupón cero, última columna): da prácticamente lo mismo. "
+                             "El AN29 queda afuera porque su duration es casi igual a la del AO29.",
+                   "bonares": "Los Bonares (ley local) amortizan en cuotas, así que el plazo de cada uno es su duration y no su vencimiento: es la forma habitual en el mercado. "
+                              "El bootstrapping exacto no sirve acá: con pocos bonos que devuelven el capital en cuotas da forwards absurdas, incluso negativas. "
+                              "El AE38 tiene menos duration que el AL35 aunque vence después, porque empieza a devolver el capital antes (2027 contra 2031).",
+                   "globales": "Los Globales (ley Nueva York) amortizan en cuotas, así que el plazo de cada uno es su duration y no su vencimiento: es la forma habitual en el mercado. "
+                               "El GD38 tiene menos duration que el GD35 aunque vence después, porque empieza a devolver el capital antes (2027 contra 2031). "
+                               "Las forwards de los tramos largos son poco confiables: las durations están muy juntas y una diferencia chica de precio mueve mucho la forward."}
+        st.caption(notas_u[tipo_w])
+    else:
+        unidad = "devaluación mensual" if tipo_w == "dl" else ("tasa real mensual" if tipo_w == "cer" else "TEM")
+        alta, baja = FW["fwd_mensual"].idxmax(), FW["fwd_mensual"].idxmin()
+        u1, u2, u3, u4 = st.columns(4)
+        u1.metric("Primer tramo (spot)", f"{FW['fwd_mensual'].iloc[0]:.2%}", f"{unidad} · {FW.index[0]}", delta_color="off")
+        u2.metric("Forward más alta", f"{FW.loc[alta, 'fwd_mensual']:.2%}", alta, delta_color="off")
+        u3.metric("Forward más baja", f"{FW.loc[baja, 'fwd_mensual']:.2%}", baja, delta_color="off")
+        u4.metric("Último tramo", f"{FW['fwd_mensual'].iloc[-1]:.2%}", f"{(FW['fwd_mensual'].iloc[-1] - FW['fwd_mensual'].iloc[0]) * 1e4:+.0f} pb vs el primero", delta_color="off")
+        fig, ax = plt.subplots(figsize=(11, 4.2))
+        for i, (tr, r) in enumerate(FW.iterrows()):
+            ax.hlines(r["fwd_mensual"] * 100, r["desde"], r["hasta"], color=AZUL, lw=3, label="Forward de cada tramo" if i == 0 else None)
+        ax.scatter(FW["hasta"], FW["spot_mensual"] * 100, color=GRIS, s=26, zorder=3, label="Tasa spot de cada bono (de hoy a su vencimiento)")
+        etiquetar(ax, FW["hasta"], FW["spot_mensual"] * 100, [t.split(" → ")[1] for t in FW.index])
+        curva_w = None
+        if tipo_w == "fija":
+            curva_w = RP["curva_fija"]
+        elif tipo_w == "cer":
+            ceros = RP["cer"][RP["cer"].index.isin({c[0] for c in P.CERZ}) & (RP["cer"]["dias"] >= 30)]
+            curva_w = P.ajustar_ns([(d / 365, y) for d, y in zip(ceros["dias"], ceros["tir_real"])]) if len(ceros) >= 4 else None
+        if curva_w:
+            FC = M.forward_curva(curva_w, FW["hasta"].max())
+            if len(FC):
+                ax.plot(FC["dias"], FC["fwd_mensual"] * 100, color=VIOLETA, ls="--", lw=1.3, label="Forward a 30 días según la curva ajustada")
+        ax.set_xlabel("Días desde hoy"); ax.set_ylabel(("Devaluación" if tipo_w == "dl" else "Tasa") + " mensual (%)")
+        ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); st.pyplot(fig)
+        st.caption("Cada barra azul es la tasa que el mercado ya fija para ese período futuro; los puntos grises, la tasa de hoy hasta cada vencimiento. "
+                   "Si las barras quedan arriba de los puntos, el mercado espera tasas más altas más adelante; si quedan abajo, espera que bajen.")
+        mostrar(FW[["desde", "hasta", "dias", "fwd_mensual", "fwd_anual", "spot_mensual", "dif_pb"]],
+                {"desde": "{:.0f}", "hasta": "{:.0f}", "dias": "{:.0f}", "fwd_mensual": "{:.2%}", "fwd_anual": "{:.1%}", "spot_mensual": "{:.2%}", "dif_pb": "{:+.0f}"},
+                {"desde": "Desde (días)", "hasta": "Hasta (días)", "dias": "Días del tramo", "fwd_mensual": "Forward mensual", "fwd_anual": "Forward anual (TEA)",
+                 "spot_mensual": "Spot al final del tramo", "dif_pb": "Forward − spot (pb)"})
+        notas_w = {"fija": "Con LECAP y BONCAP: (1 + forward) = (pago final / precio del bono largo ÷ pago final / precio del corto) ^ (30 / días del tramo). Los BONTE con cupones no entran.",
+                   "cer": "Con los bonos CER cupón cero: es la tasa real (por encima de la inflación) que el mercado fija para cada período futuro.",
+                   "dl": "Con el dólar de equilibrio de cada dólar linked: es la devaluación mensual del A3500 que el mercado descuenta para cada período futuro, comparando contra la tasa fija."}
+        st.caption(notas_w[tipo_w])
+
 # ── Variación diaria contra el cierre anterior ──
 with tabV:
     v1, v2, v3, v4, v5 = st.columns([1, 1.3, 1.2, 1, 1])
@@ -441,7 +517,7 @@ with tabV:
     if st.session_state.get("_grupo_var") != grupo:  # por defecto los duales entran en la curva TAMAR y no en la CER, como en Bonerío
         st.session_state["duales_var"] = grupo == "tamar"; st.session_state["_grupo_var"] = grupo
     duales_v = v5.checkbox("Incluir duales en la curva", key="duales_var", disabled=grupo not in ("tamar", "cer")) and grupo in ("tamar", "cer")
-    VD, info = M.variacion(grupo, PAN, DP, tamar=tamar_sup, infl=infl_sup, duales=duales_v, ipc_publicado=IPC_PUB, rem_mensual=REM_MED)
+    VD, info = variacion_mercado(en_vivo, grupo, tamar_sup, infl_sup, duales_v)
     if plazo_v:
         VD = VD[VD["dias"] <= plazo_v]
     if VD.empty:
@@ -906,28 +982,6 @@ with tab2:
     mostrar(mensual[["mercado", "rem", "rem_p25", "rem_p75"]], {c: "{:.2%}" for c in ["mercado", "rem", "rem_p25", "rem_p75"]},
             {"mercado": "Mercado", "rem": "REM mediana", "rem_p25": "REM P25", "rem_p75": "REM P75"})
 
-# ── 3. ML ──
-with tab3:
-    X, y, bt, mae, pron = modelos(en_vivo)
-    comp = B.comparar_expectativas(pron, mensual, y)
-    st.subheader("Validación fuera de muestra")
-    st.caption("Error absoluto medio en puntos porcentuales de inflación mensual. Cada pronóstico se hizo solo con datos anteriores.")
-    mostrar(mae.sort_values("h=1"), {c: "{:.3f}" for c in mae.columns})
-    fig, ax = plt.subplots(figsize=(10, 3))
-    ax.plot(bt.index.to_timestamp(), bt["Real"], color="black", lw=2, label="IPC real")
-    ax.plot(bt.index.to_timestamp(), bt["Paseo aleatorio"], ls="--", color=B.COLORES["gris"], label="Paseo aleatorio")
-    ax.plot(bt.index.to_timestamp(), bt["Ensamble ML"], color=B.COLORES["modelo"], label="Ensamble ML")
-    ax.legend(fontsize=8); st.pyplot(fig)
-    st.subheader("Mercado, analistas y modelo")
-    mostrar(comp[["h", "modelo", "mercado", "rem", "rem_p25", "rem_p75"]],
-            {"h": "{:.0f}", "modelo": "{:.2%}", "mercado": "{:.2%}", "rem": "{:.2%}", "rem_p25": "{:.2%}", "rem_p75": "{:.2%}"},
-            {"modelo": "Modelo ML", "mercado": "Mercado", "rem": "REM mediana", "rem_p25": "REM P25", "rem_p75": "REM P75"})
-    st.caption("h = meses hacia adelante desde el último IPC publicado. Más allá de 3 meses el modelo no supera al paseo aleatorio en el backtest.")
-    st.subheader("Señal tasa fija vs CER")
-    senal = B.senales_fija_vs_cer(D, curva, tabla_be, comp)
-    mostrar(senal, {"vence": "{:%d/%m/%Y}", "BE mensual": "{:.2%}", "Tasa fija": "{:+.2%}", "CER con modelo": "{:+.2%}", "CER con REM": "{:+.2%}"},
-            {"Tasa fija": "Retorno tasa fija", "CER con modelo": "Retorno CER (modelo)", "CER con REM": "Retorno CER (REM)"})
-
 # ── 4. LLM ──
 with tab4:
     st.subheader("Resumen ejecutivo")
@@ -945,15 +999,13 @@ with tab4:
     if st.button("Generar resumen"):
         if clave:
             os.environ["ANTHROPIC_API_KEY"] = clave
-        X, y, bt, mae, pron = modelos(en_vivo)
-        comp = B.comparar_expectativas(pron, mensual, y)
-        senal = B.senales_fija_vs_cer(D, curva, tabla_be, comp)
-        usd = B.universo_usd()
-        r, _ = B.monte_carlo_bono(usd["AE38"], liq_usd, tabla_usd.loc["AE38", "precio"], B.sumar_meses(liq_usd, 6),
-                                  tabla_usd.loc["AE38", "tir"], tabla_usd.loc["AE38", "tir"])
-        res_mc = pd.Series({"Retorno esperado": r.mean(), "Mediana": np.median(r), "Percentil 5": np.percentile(r, 5),
-                            "Percentil 95": np.percentile(r, 95), "Prob. retorno > 0": (r > 0).mean()})
-        ctx = B.contexto_resultados(tabla_usd, tabla_be, comp, senal, B.metricas_error(bt), res_mc, D["fecha"])
+        senal = B.senales_fija_vs_cer(D, curva, tabla_be)                       # retorno de cada par si se cumple el REM
+        fw_fija = M.forwards(RP, "fija", 14)
+        fw_usd = M.forwards(RP, "tesoro", 90, tabla_usd)
+        extra = {"tasas_forward": {
+            "pesos_tasa_fija_TEM_%": {k: round(float(v) * 100, 2) for k, v in fw_fija["fwd_mensual"].items()},
+            f"dolares_tesoro_anual_%_{'cable' if moneda == 'ccl' else 'mep'}": {k: round(float(v) * 100, 2) for k, v in fw_usd["fwd_anual"].items()}}}
+        ctx = B.contexto_resultados(tabla_usd, tabla_be, mensual, senal, fecha=D["fecha"], extra=extra)
         with st.expander("Contexto enviado al modelo (JSON)"):
             st.json(ctx)
         try:

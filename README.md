@@ -1,6 +1,6 @@
 # BondAI · Renta fija argentina con IA
 
-Aplicación en Streamlit que baja precios de BYMA y series del BCRA, calcula curvas, breakeven, flujos, dólares y premios de licitación, pronostica la inflación con machine learning y redacta un resumen con IA.
+Aplicación en Streamlit que baja precios de BYMA y series del BCRA, calcula curvas, tasas forward (en pesos y en dólares), breakeven, flujos, dólares y premios de licitación, y redacta un resumen con IA. El pronóstico de inflación con machine learning y el Monte Carlo están en el notebook.
 
 Herramienta académica (Programación para Economistas, UCA). No es recomendación de inversión.
 

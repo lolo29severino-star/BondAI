@@ -483,12 +483,14 @@ def comparar_expectativas(pron, mensual, y):
     return comp.loc[comp.index >= str(y.dropna().index[-1] + 1)]
 
 
-def senales_fija_vs_cer(datos, curva, tabla_be, comp):
-    """Retorno al vencimiento de cada par si se cumple el sendero del modelo o el del REM."""
+def senales_fija_vs_cer(datos, curva, tabla_be, comp=None):
+    """Retorno al vencimiento de cada par si se cumple el sendero del REM y, si se pasa comp, también el del modelo."""
     rem = datos["rem_mensual"]
-    sendero = comp["modelo"].dropna().to_dict()
-    ultimo = list(sendero.values())[-1]
-    ipc_modelo = lambda m: sendero.get(m, ultimo)
+    con_modelo = comp is not None and "modelo" in comp and comp["modelo"].notna().any()
+    if con_modelo:
+        sendero = comp["modelo"].dropna().to_dict()
+        ultimo = list(sendero.values())[-1]
+        ipc_modelo = lambda m: sendero.get(m, ultimo)
     ultimo_rem = rem["mediana"].dropna().iloc[-1] / 100          # después del último mes del REM se repite su último valor
     ipc_rem = lambda m: rem.loc[m, "mediana"] / 100 if m in rem.index else ultimo_rem
     bases = {t: b for t, _, b in CER_CERO}
@@ -497,12 +499,15 @@ def senales_fija_vs_cer(datos, curva, tabla_be, comp):
         pf, pc = datos["precios_pesos"][f], datos["precios_pesos"][r["cer"]]
         base = datos["cer"][pd.Timestamp(bases[r["cer"]])]
         ret_fija = curva.loc[f, "pago_final"] / pf - 1
-        ret_mod = 100 * proyectar_cer(datos["cer"], r["ref1"], ipc_modelo) / base / pc - 1
         ret_rem = 100 * proyectar_cer(datos["cer"], r["ref1"], ipc_rem) / base / pc - 1
-        filas.append({"par": f"{f}/{r['cer']}", "vence": r["vence"], "BE mensual": r["be_mensual"], "Tasa fija": ret_fija,
-                      "CER con modelo": ret_mod, "CER con REM": ret_rem,
-                      "Señal (modelo)": "CER" if ret_mod > ret_fija else "Tasa fija",
-                      "Señal (REM)": "CER" if ret_rem > ret_fija else "Tasa fija"})
+        fila = {"par": f"{f}/{r['cer']}", "vence": r["vence"], "BE mensual": r["be_mensual"], "Tasa fija": ret_fija}
+        if con_modelo:
+            ret_mod = 100 * proyectar_cer(datos["cer"], r["ref1"], ipc_modelo) / base / pc - 1
+            fila.update({"CER con modelo": ret_mod, "CER con REM": ret_rem, "Señal (modelo)": "CER" if ret_mod > ret_fija else "Tasa fija"})
+        else:
+            fila["CER con REM"] = ret_rem
+        fila["Señal (REM)"] = "CER" if ret_rem > ret_fija else "Tasa fija"
+        filas.append(fila)
     return pd.DataFrame(filas).set_index("par")
 
 
@@ -521,10 +526,13 @@ def monte_carlo_bono(b, liq, precio, salida, y0, theta, kappa=1.5, sigma=0.0164,
     return (p_salida + cobrado) / precio - 1, yT
 
 
-def contexto_resultados(tabla_usd, tabla_be, comp, tabla_senal, errores, resumen_mc, fecha):
-    """Resultados clave en un diccionario serializable (lo único que ve el LLM)."""
+def contexto_resultados(tabla_usd, tabla_be, comp, tabla_senal, errores=None, resumen_mc=None, fecha=None, extra=None):
+    """Resultados clave en un diccionario serializable (lo único que ve el LLM).
+    errores (backtest del ML) y resumen_mc (Monte Carlo) son opcionales: la app web los omite; extra agrega otras secciones."""
     sob = tabla_usd.sort_values("spread_pb")
-    return {
+    cols = [c for c in ["mercado", "rem", "modelo"] if c in comp]
+    señales = [c for c in ["Señal (modelo)", "Señal (REM)"] if c in tabla_senal]
+    c = {
         "fecha": str(fecha),
         "curva_usd": {"tir_mediana": round(float(tabla_usd["tir"].median()) * 100, 2),
                       "mas_barato": [sob.index[-1], round(float(sob["spread_pb"].iloc[-1]))],
@@ -533,13 +541,17 @@ def contexto_resultados(tabla_usd, tabla_be, comp, tabla_senal, errores, resumen
                                 "rem_mismo_plazo_%": None if pd.isna(v["be_rem_mensual"]) else round(v["be_rem_mensual"] * 100, 2)}
                             for k, v in tabla_be.iterrows()},
         "inflacion_mensual_esperada_%": {m: {k: (None if pd.isna(v) else round(v * 100, 2)) for k, v in r.items()}
-                                         for m, r in comp[["mercado", "rem", "modelo"]].iterrows()},
-        "mejor_modelo_backtest": {"nombre": errores.index[0], "mae_pp": round(float(errores.iloc[0]["MAE (pp)"]), 3),
-                                  "mae_ensamble_pp": round(float(errores.loc["Ensamble ML", "MAE (pp)"]), 3),
-                                  "mae_paseo_aleatorio_pp": round(float(errores.loc["Paseo aleatorio", "MAE (pp)"]), 3)},
-        "senales_tasa_fija_vs_cer": tabla_senal[["Señal (modelo)", "Señal (REM)"]].to_dict(orient="index"),
-        "montecarlo_AE38_6m": {k: round(float(v) * 100, 1) for k, v in resumen_mc.items()},
+                                         for m, r in comp[cols].iterrows()},
     }
+    if errores is not None:
+        c["mejor_modelo_backtest"] = {"nombre": errores.index[0], "mae_pp": round(float(errores.iloc[0]["MAE (pp)"]), 3),
+                                      "mae_ensamble_pp": round(float(errores.loc["Ensamble ML", "MAE (pp)"]), 3),
+                                      "mae_paseo_aleatorio_pp": round(float(errores.loc["Paseo aleatorio", "MAE (pp)"]), 3)}
+    c["senales_tasa_fija_vs_cer"] = tabla_senal[señales].to_dict(orient="index")
+    if resumen_mc is not None:
+        c["montecarlo_AE38_6m"] = {k: round(float(v) * 100, 1) for k, v in resumen_mc.items()}
+    c.update(extra or {})
+    return c
 
 
 PROMPT_SISTEMA = ("Sos analista de renta fija en Argentina. Redactás resúmenes ejecutivos breves, en español rioplatense neutro, "
@@ -558,31 +570,55 @@ def resumen_llm(contexto, modelo="claude-sonnet-5-5", max_tokens=700):
         pass
     if not clave:
         raise RuntimeError("Falta ANTHROPIC_API_KEY")
+    temas = ["curva en dólares", "inflación esperada", "señal tasa fija vs CER"] + \
+            (["tasas forward en pesos y en dólares"] if "tasas_forward" in contexto else []) + ["riesgos"]
     import anthropic
     cliente = anthropic.Anthropic(api_key=clave)
     msj = cliente.messages.create(
         model=modelo, max_tokens=max_tokens, system=PROMPT_SISTEMA,
-        messages=[{"role": "user", "content": "Escribí un resumen ejecutivo de 4 párrafos cortos (curva en dólares, inflación esperada, "
-                                              "señal tasa fija vs CER, riesgos) con estos resultados:\n" + json.dumps(contexto, ensure_ascii=False)}])
+        messages=[{"role": "user", "content": f"Escribí un resumen ejecutivo de {len(temas)} párrafos cortos ({', '.join(temas)}) "
+                                              "con estos resultados:\n" + json.dumps(contexto, ensure_ascii=False)}])
     return msj.content[0].text
 
 
 def resumen_plantilla(c):
-    """Resumen sin LLM (respaldo determinístico) a partir del mismo contexto."""
+    """Resumen sin LLM (respaldo determinístico) a partir del mismo contexto. Las partes de ML, Monte Carlo y forwards
+    aparecen solo si están en el contexto."""
     inf = c["inflacion_mensual_esperada_%"]
     meses = [m for m, v in inf.items() if v.get("mercado") is not None and v.get("rem") is not None]
     dif = np.mean([inf[m]["mercado"] - inf[m]["rem"] for m in meses]) if meses else float("nan")
     mod = [inf[m]["modelo"] for m in inf if inf[m].get("modelo") is not None]
     sen = c["senales_tasa_fija_vs_cer"]
-    n_cer = sum(v["Señal (modelo)"] == "CER" for v in sen.values())
     n_cer_rem = sum(v["Señal (REM)"] == "CER" for v in sen.values())
-    return (f"Curva en dólares ({c['fecha']}): la TIR mediana de los soberanos es {c['curva_usd']['tir_mediana']}%. "
-            f"El bono más barato contra su curva es {c['curva_usd']['mas_barato'][0]} ({c['curva_usd']['mas_barato'][1]:+d} pb) y el más caro, "
-            f"{c['curva_usd']['mas_caro'][0]} ({c['curva_usd']['mas_caro'][1]:+d} pb).\n\n"
-            f"Inflación esperada: entre {mes_corto(meses[0]) if meses else '–'} y {mes_corto(meses[-1]) if meses else '–'} el mercado descuenta en promedio "
-            f"{dif:+.2f} pp por mes respecto de la mediana del REM. El modelo de Machine Learning proyecta entre {min(mod):.2f}% y {max(mod):.2f}% mensual "
-            f"(en el backtest a 1 mes el ensamble erra en promedio {c['mejor_modelo_backtest']['mae_ensamble_pp']} pp, contra "
-            f"{c['mejor_modelo_backtest']['mae_paseo_aleatorio_pp']} pp del paseo aleatorio).\n\n"
-            f"Señal: con el sendero del modelo, {n_cer} de {len(sen)} pares favorecen al CER; con el sendero del REM, {n_cer_rem} de {len(sen)}.\n\n"
-            f"Riesgos: en Monte Carlo, el AE38 tiene {c['montecarlo_AE38_6m']['Prob. retorno > 0']}% de probabilidad de retorno positivo a 6 meses "
-            f"y un percentil 5 de {c['montecarlo_AE38_6m']['Percentil 5']}%. Herramienta académica; no constituye recomendación de inversión.")
+    texto = (f"Curva en dólares ({c['fecha']}): la TIR mediana de los soberanos es {c['curva_usd']['tir_mediana']}%. "
+             f"El bono más barato contra su curva es {c['curva_usd']['mas_barato'][0]} ({c['curva_usd']['mas_barato'][1]:+d} pb) y el más caro, "
+             f"{c['curva_usd']['mas_caro'][0]} ({c['curva_usd']['mas_caro'][1]:+d} pb).\n\n"
+             f"Inflación esperada: entre {mes_corto(meses[0]) if meses else '–'} y {mes_corto(meses[-1]) if meses else '–'} el mercado descuenta en promedio "
+             f"{dif:+.2f} pp por mes respecto de la mediana del REM.")
+    if mod and "mejor_modelo_backtest" in c:
+        texto += (f" El modelo de Machine Learning proyecta entre {min(mod):.2f}% y {max(mod):.2f}% mensual "
+                  f"(en el backtest a 1 mes el ensamble erra en promedio {c['mejor_modelo_backtest']['mae_ensamble_pp']} pp, contra "
+                  f"{c['mejor_modelo_backtest']['mae_paseo_aleatorio_pp']} pp del paseo aleatorio).")
+    if all("Señal (modelo)" in v for v in sen.values()) and sen:
+        n_cer = sum(v["Señal (modelo)"] == "CER" for v in sen.values())
+        texto += f"\n\nSeñal: con el sendero del modelo, {n_cer} de {len(sen)} pares favorecen al CER; con el sendero del REM, {n_cer_rem} de {len(sen)}."
+    else:
+        texto += f"\n\nSeñal: si la inflación sigue el sendero del REM, {n_cer_rem} de {len(sen)} pares tasa fija/CER favorecen al CER."
+    fw = c.get("tasas_forward", {})
+    pesos = fw.get("pesos_tasa_fija_TEM_%", {})
+    dol = next((v for k, v in fw.items() if k.startswith("dolares")), {})
+    if pesos or dol:
+        texto += "\n\nTasas forward:"
+        if pesos:
+            alto = max(pesos, key=pesos.get)
+            texto += (f" en pesos, la TEM de hoy al primer vencimiento es {list(pesos.values())[0]}% y la forward más alta, "
+                      f"{pesos[alto]}% en el tramo {alto}.")
+        if dol:
+            texto += " En dólares, los bonos del Tesoro descuentan " + ", ".join(f"{v}% anual en el tramo {k}" for k, v in dol.items()) + "."
+    if "montecarlo_AE38_6m" in c:
+        texto += (f"\n\nRiesgos: en Monte Carlo, el AE38 tiene {c['montecarlo_AE38_6m']['Prob. retorno > 0']}% de probabilidad de retorno positivo a 6 meses "
+                  f"y un percentil 5 de {c['montecarlo_AE38_6m']['Percentil 5']}%. Herramienta académica; no constituye recomendación de inversión.")
+    else:
+        texto += ("\n\nRiesgos: las tasas implícitas incluyen primas por plazo y por riesgo, así que no son pronósticos puros; un salto del dólar "
+                  "o de la inflación cambia todos estos números. Herramienta académica; no constituye recomendación de inversión.")
+    return texto
