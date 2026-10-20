@@ -5,7 +5,9 @@ Publicada en internet: ver README.md (GitHub + Streamlit Community Cloud).
 Usa las mismas funciones que el notebook (bondai.py, pesos.py, mercado.py, dolares.py, licitaciones.py, externos.py y portafolio.py
 deben estar en la misma carpeta).
 """
+import io
 import os
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -17,12 +19,21 @@ import streamlit as st
 import bondai as B
 import dolares as DL
 import externos as X
+import informe as I
 import licitaciones as L
 import mercado as M
 import pesos as P
 import portafolio as PF
 
 st.set_page_config(page_title="BondAI · Renta fija con IA", page_icon="📈", layout="wide")
+
+
+def ver_grafico(fig, destino=None):
+    """Muestra un gráfico de matplotlib como PNG a 110 dpi (st.pyplot usa 200: el doble de peso para el navegador) y libera la figura."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    (destino or st).image(buf, width="stretch")
 
 
 # ── datos y cálculos (cacheados para que la app responda rápido) ──
@@ -96,6 +107,25 @@ def cargar_ust(en_vivo, fecha):
 @st.cache_data(ttl=300, show_spinner="Bajando las obligaciones negociables de data912…")
 def cargar_ons(en_vivo):
     return X.cargar_ons(en_vivo)
+
+
+@st.cache_data(ttl=3 * 3600, show_spinner="Buscando licitaciones nuevas en la Secretaría de Finanzas…")
+def cargar_licitaciones(en_vivo, hoy):
+    dp = cargar_pesos(en_vivo)
+    return L.actualizar(en_vivo, dp["cer"], dp["tamar"], dp["a3500"], hoy)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def informe_semana(en_vivo, hoy):
+    dp = cargar_pesos(en_vivo)
+    riesgo, _ = cargar_riesgo(en_vivo)
+    sub, col, _, _ = cargar_licitaciones(en_vivo, hoy)
+    return I.semana(en_vivo, dp["cer"], dp["tamar"], riesgo, DL.series(cargar_dolares(en_vivo)), (sub, col))
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def cargar_fichas_ons(en_vivo, raices):
+    return X.cargar_fichas(list(raices), usar_api=en_vivo)
 
 
 @st.cache_data(ttl=3600, show_spinner="Bajando el histórico de precios de cada bono (BYMA)…")
@@ -199,6 +229,8 @@ def dolar_bono(simbolo_usd):
         return v
     s_ = DL.series(cargar_dolares(en_vivo))["mep" if simbolo_usd == "AL30D" else "cable"].dropna()
     return float(s_.iloc[-1]) if len(s_) else np.nan
+st.title("BondAI · Renta fija argentina con IA")
+tabla_usd, liq_usd, curva, tabla_be, cer_ref, liq_ars, mensual = calcular(en_vivo, moneda)
 FUT, F_FUT = cargar_futuros(en_vivo)
 RIESGO, F_RIESGO = cargar_riesgo(en_vivo)
 ONS, F_ONS = cargar_ons(en_vivo)
@@ -207,9 +239,6 @@ for k, v in [("futuros", F_FUT), ("riesgo país", F_RIESGO), ("ONs", F_ONS)]:
 st.sidebar.caption(f"Fecha de análisis: {D['fecha']:%d/%m/%Y} · datos bajados a las {D['bajado']:%H:%M} (hora argentina)")
 st.sidebar.caption("Herramienta académica. No es recomendación de inversión.")
 
-tabla_usd, liq_usd, curva, tabla_be, cer_ref, liq_ars, mensual = calcular(en_vivo, moneda)
-
-st.title("BondAI · Renta fija argentina con IA")
 c1, c5, c2, c3, c4 = st.columns([1, 1, 1.25, 0.9, 0.9])
 c1.metric("TIR mediana soberanos USD", f"{tabla_usd['tir'].median():.2%}")
 # supuestos por defecto de «Tesoro en pesos» (24 hs, VWAP): el mismo cálculo queda en memoria y la pestaña lo reusa
@@ -232,7 +261,7 @@ c4.metric("Último IPC", f"{D['macro']['ipc'].dropna().iloc[-1]:.1f}%", D["macro
 
 (tab1, tabR, tabN, tabP, tab2, tabFU, tabW, tabPF, tabV, tabO, tabF, tabD, tabL, tab4) = st.tabs(
     ["Curva en dólares", "Riesgo país", "ONs", "Tesoro en pesos", "Inflación breakeven", "Devaluación esperada", "Tasas forward", "Mi portafolio",
-     "Variación diaria", "Volumen", "Flujos de fondos", "Dólares", "Licitaciones", "Resumen con IA"])
+     "Variación diaria", "Volumen", "Flujos de fondos", "Dólares", "Licitaciones", "Informe semanal con IA"])
 
 # ── 1. curva USD ──
 with tab1:
@@ -240,13 +269,16 @@ with tab1:
     with izq:
         st.subheader("Métricas por bono")
         st.caption(f"Precios en dólar {'cable (tickers C)' if moneda == 'ccl' else 'MEP (tickers D)'}, liquidación {liq_usd:%d/%m/%Y}. "
-                   "Spread = TIR − curva Nelson-Siegel de su legislación. Var.: verde si subió, rojo si bajó; más intenso, más movimiento.")
+                   "Spread = TIR − curva Nelson-Siegel de su legislación. Rend. corriente = cupón anual vigente / precio (no incluye la ganancia "
+                   "o pérdida de capital ni la reinversión). Paridad = precio / valor técnico (residual + intereses corridos 30/360). "
+                   "Var.: verde si subió, rojo si bajó; más intenso, más movimiento.")
         tu = tabla_usd.copy()
         tu["var"] = [(PAN["t1"].get(t + SUF) or [0] * 8)[7] for t in tu.index]  # variación del día que informa BYMA
-        mostrar(tu[["familia", "precio", "var", "tir", "md", "convexidad", "paridad", "vt", "spread_pb"]],
-                {"precio": "{:.2f}", "var": "{:+.2%}", "tir": "{:.2%}", "md": "{:.2f}", "convexidad": "{:.1f}", "paridad": "{:.1%}", "vt": "{:.2f}", "spread_pb": "{:+.0f}"},
-                {"familia": "Familia", "precio": "Precio", "var": "Var.", "tir": "TIR", "md": "MD", "convexidad": "Convexidad", "paridad": "Paridad",
-                 "vt": "Valor técnico", "spread_pb": "Spread (pb)"}, calor={"var": "var"})
+        mostrar(tu[["familia", "precio", "var", "tir", "current_yield", "md", "convexidad", "paridad", "vt", "spread_pb"]],
+                {"precio": "{:.2f}", "var": "{:+.2%}", "tir": "{:.2%}", "current_yield": "{:.2%}", "md": "{:.2f}", "convexidad": "{:.1f}", "paridad": "{:.1%}",
+                 "vt": "{:.2f}", "spread_pb": "{:+.0f}"},
+                {"familia": "Familia", "precio": "Precio", "var": "Var.", "tir": "TIR", "current_yield": "Rend. corriente", "md": "MD",
+                 "convexidad": "Convexidad", "paridad": "Paridad", "vt": "Valor técnico", "spread_pb": "Spread (pb)"}, calor={"var": "var"})
     with der:
         st.subheader("Curva TIR vs duration")
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -259,7 +291,7 @@ with tab1:
         ax.plot(g, B.nelson_siegel(g, *tabla_usd.attrs["Local"]) * 100, color=B.COLORES["bonar"], alpha=.6)
         ax.plot(g, B.nelson_siegel(g, *tabla_usd.attrs["Nueva York"]) * 100, color=B.COLORES["global"], alpha=.6)
         ax.set_xlabel("Duration modificada"); ax.set_ylabel("TIR %"); ax.legend(fontsize=8)
-        st.pyplot(fig)
+        ver_grafico(fig)
 
 
 # ── gráficos comunes ──
@@ -417,7 +449,7 @@ with tabP:
                 mostrar(t[["vence", "dias", "precio", "var", "pago_t", "tna", "tem", "tirea", "md", "spread_pb", "vol"]],
                         {**COM, "tna": "{:.2%}", "tem": "{:.2%}", "tirea": "{:.2%}"},
                         {**NOM, "pago_t": "Pago final", "tna": "TNA", "tem": "TEM", "tirea": "TIREA"}, calor={"var": "var"})
-                st.pyplot(grafico_pesos(df, "tirea", cf, "#2a78d6" if k == "lecap" else "#1baf7a", "TIREA", "Duration (años)"))
+                ver_grafico(grafico_pesos(df, "tirea", cf, "#2a78d6" if k == "lecap" else "#1baf7a", "TIREA", "Duration (años)"))
             elif k == "cer":
                 c1, c2 = st.columns([1.3, 1])
                 vista_cer = c1.radio("Gráfico", ["TIR real por plazo", "Inflación breakeven mensual vs REM"], horizontal=True)
@@ -435,9 +467,9 @@ with tabP:
                         {**NOM, "valor_tecnico": "VT", "paridad": "Paridad", "tir_real": "TIR real (TEA)", "tna_real": "TNA real 30/365",
                          "tna_nominal": "TNA nominal 30/365", "be_t": "Inflación BE mensual", "rem_mensual": "REM mensual", "be_rem_pb": "BE − REM (pb)"}, calor={"var": "var"})
                 if vista_cer.startswith("TIR"):
-                    st.pyplot(grafico_cer_tir(d))
+                    ver_grafico(grafico_cer_tir(d))
                 else:
-                    st.pyplot(grafico_be(d, RP["max_cero"]))
+                    ver_grafico(grafico_be(d, RP["max_cero"]))
                     fuera = d[~np.isfinite(d["be_mensual"].astype(float))]
                     if len(fuera):
                         largos = fuera[fuera["be_nota"].str.startswith("vence")].index.tolist(); pub = fuera[fuera["be_nota"] == "CER ya publicado"].index.tolist()
@@ -451,7 +483,7 @@ with tabP:
                         {**COM, "tamar_prom": "{:.2f}%", "valor_tecnico": "{:,.2f}", "paridad": "{:.1%}", "tirea": "{:.2%}", "tem": "{:.2%}", "tamar_be": "{:.2f}%", "margen_s_tamar": "{:.2f}%"},
                         {**NOM, "margen_t": "Margen licitación", "tamar_prom": "TAMAR prom.", "valor_tecnico": "VT est.", "paridad": "Paridad", "tirea": "TIREA est.",
                          "tem": "TEM est.", "tamar_be": "TAMAR BE", "margen_s_tamar": "Margen s/ TAMAR"}, calor={"var": "var"})
-                st.pyplot(grafico_margen_tamar(df, RP["dual"], tamar_sup))
+                ver_grafico(grafico_margen_tamar(df, RP["dual"], tamar_sup))
             elif k == "dual":
                 st.markdown(f"Con TAMAR en {tamar_sup:.2f}%, pagan la pata TAMAR **{(df['paga'] == 'TAMAR').sum()} de {len(df)}** · el piso es lo que asegura la otra pata aunque la TAMAR caiga")
                 t = df.copy()
@@ -461,7 +493,7 @@ with tabP:
                         {**COM, "pago_pata1": "{:,.2f}", "pago_tamar": "{:,.2f}", "tirea": "{:.2%}", "margen_s_tamar": "{:.2f}%"},
                         {**NOM, "patas": "Patas", "pago_pata1": "Pago pata 1", "pago_tamar": "Pago TAMAR", "paga": "Paga", "tirea": "TIREA est.", "piso_t": "Piso",
                          "cruce_t": "TAMAR de cruce", "margen_s_tamar": "Margen s/ TAMAR"}, calor={"var": "var"})
-                st.pyplot(grafico_pesos(df, "tirea", cf, "#2a78d6", "TIREA estimada"))
+                ver_grafico(grafico_pesos(df, "tirea", cf, "#2a78d6", "TIREA estimada"))
             else:
                 ult = df.iloc[-1]
                 st.markdown(f"A3500 hoy **\\${RP['tc_hoy']:,.2f}** · Dólar breakeven {ult['vence']:%m/%Y}: **\\${ult['dolar_be']:,.0f}** ({ult['deval_total']:+.1%})")
@@ -472,7 +504,7 @@ with tabP:
                         {**NOM, "precio": "Precio $", "precio_usd": "Precio USD", "tir_usd": "TIR USD", "dolar_be": "Dólar BE", "deval_mensual": "Deval. mensual",
                          "tirea_esperada": "TIREA $ esperada", "vs_fija_pb": "vs tasa fija (pb)"},
                         na="= curva", calor={"var": "var"})
-                st.pyplot(grafico_pesos(df[df["dias"] >= 15], "deval_mensual", None, "#1baf7a", "Devaluación mensual implícita"))
+                ver_grafico(grafico_pesos(df[df["dias"] >= 15], "deval_mensual", None, "#1baf7a", "Devaluación mensual implícita"))
             st.caption(NOTAS[k])
 
 # ── Tasas forward implícitas en las curvas en pesos y en dólares ──
@@ -506,7 +538,7 @@ with tabW:
         etiquetar(ax, FW["hasta"] / 365, FW["spot_anual"] * 100, [t.split(" → ")[1] for t in FW.index])
         ax.set_xlabel("Duration (años)"); ax.set_ylabel("Tasa anual en dólares (%)")
         ax.grid(alpha=.25); ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, frameon=False)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         st.caption(f"Precios en dólar {'cable' if moneda == 'ccl' else 'MEP'} (se cambia en la barra lateral). Cada barra azul es la tasa anual en dólares "
                    "que el mercado ya fija para ese tramo; los puntos grises, la TIR de cada bono. Si las barras quedan arriba de los puntos, la curva tiene pendiente positiva.")
         T = FW[["vence", "desde", "hasta", "dias", "fwd_anual", "spot_anual", "dif_anual_pb"]].copy()
@@ -554,7 +586,7 @@ with tabW:
             if len(FC):
                 ax.plot(FC["dias"], FC["fwd_mensual"] * 100, color=VIOLETA, ls="--", lw=1.3, label="Forward a 30 días según la curva ajustada")
         ax.set_xlabel("Días desde hoy"); ax.set_ylabel(("Devaluación" if tipo_w == "dl" else "Tasa") + " mensual (%)")
-        ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); st.pyplot(fig)
+        ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); ver_grafico(fig)
         st.caption("Cada barra azul es la tasa que el mercado ya fija para ese período futuro; los puntos grises, la tasa de hoy hasta cada vencimiento. "
                    "Si las barras quedan arriba de los puntos, el mercado espera tasas más altas más adelante; si quedan abajo, espera que bajen.")
         mostrar(FW[["desde", "hasta", "dias", "fwd_mensual", "fwd_anual", "spot_mensual", "dif_pb"]],
@@ -618,7 +650,7 @@ with tabV:
             if grupo == "tamar":
                 ax.axhline(0, color=GRIS, lw=.8, ls="--")
             ax.set_xlabel(info["xlab"]); ax.set_ylabel(info["ylab"]); ax.grid(alpha=.25); ax.legend(fontsize=8)
-            fig.tight_layout(); st.pyplot(fig)
+            fig.tight_layout(); ver_grafico(fig)
             st.caption("Verde: la tasa bajó (el precio subió); rojo: la tasa subió; círculo hueco: rendimiento al cierre anterior. "
                        "El rendimiento de ayer se calcula con el cierre anterior y la liquidación del día hábil previo, así que también refleja el paso del tiempo."
                        + (f" Margen s/ TAMAR con la TAMAR supuesta de {info['tamar_sup']:.2f}%." if grupo == "tamar" else "") + (" * = dual." if VD["dual"].any() else ""))
@@ -629,7 +661,7 @@ with tabV:
             ax.set_yticks(range(len(Rv)), Rv.index, fontsize=8); ax.invert_yaxis(); ax.axvline(0, color="black", lw=.8)
             for i, (v, c) in enumerate(zip(Rv["var"], Rv["cambio_pb"])):
                 ax.annotate(f"{v:+.2%} · {pb(c)}", (v * 100, i), xytext=(4 if v >= 0 else -4, -3), textcoords="offset points", fontsize=7, ha="left" if v >= 0 else "right")
-            ax.set_xlabel("Variación de precio contra el cierre anterior (%)"); fig.tight_layout(); st.pyplot(fig)
+            ax.set_xlabel("Variación de precio contra el cierre anterior (%)"); fig.tight_layout(); ver_grafico(fig)
             st.caption("Ordenados por plazo. Al lado de cada barra, el cambio de rendimiento en puntos básicos.")
         es_md = grupo == "hd"
         mostrar(VD[["vence", "x", "precio", "p0", "var", "y", "y0", "cambio_pb"]],
@@ -690,7 +722,7 @@ with tabO:
     from matplotlib.lines import Line2D
     ax.legend(handles=[Line2D([], [], marker="o", ls="", color=M.COLORES[f], label=M.FAMILIAS[f]) for f in M.FAMILIAS if fam_sel in ("all", f)],
               fontsize=7, ncol=4, loc="upper center", bbox_to_anchor=(.5, 1.13), frameon=False)
-    fig.tight_layout(); st.pyplot(fig)
+    fig.tight_layout(); ver_grafico(fig)
 
     st.subheader("Dónde estuvo el volumen · por rueda")
     fam_tot = esp.groupby("familia")[["monto", "monto_previo"]].sum().reindex(list(M.FAMILIAS)).fillna(0)
@@ -716,7 +748,7 @@ with tabO:
         paso = max(1, len(fechas_v) // 10)
         ax.set_xticks(range(0, len(fechas_v), paso), [f"{d:%d/%m}" for d in fechas_v[::paso]], fontsize=8)
         ax.set_ylabel("Billones de pesos"); ax.legend(fontsize=7, ncol=4, loc="upper center", bbox_to_anchor=(.5, 1.18), frameon=False); ax.grid(axis="y", alpha=.2)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
     with g2:
         ft = fam_tot.copy()
         ft["pct"] = ft["monto"] / ft["monto"].sum(); ft["pct_prev"] = ft["monto_previo"] / ft["monto_previo"].sum(); ft["dpp"] = (ft["pct"] - ft["pct_prev"]) * 100
@@ -784,7 +816,7 @@ with tabF:
         paso = max(1, len(F) // 12)
         ax.set_xticks(range(0, len(F), paso), [f"{d:%m/%y}" for d in F.index[::paso]], fontsize=8)
         ax.set_ylabel("US$"); ax.legend(fontsize=8); ax.grid(axis="y", alpha=.2)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         T_ = F.copy()
         T_[["renta", "capital", "total", "vp"]] *= k
         mostrar(T_[["paga", "dias", "renta", "capital", "total", "residual", "vp"]],
@@ -821,7 +853,7 @@ with tabF:
         ax.bar(range(len(F)), F["capital"] * k, bottom=F["renta"] * k, color="#1baf7a", label="Capital")
         ax.set_xticks(range(len(F)), [f"{d:%m/%y}" for d in F["fecha"]], fontsize=8)
         ax.set_ylabel("$"); ax.legend(fontsize=8); ax.grid(axis="y", alpha=.2)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         T_ = F.set_index("fecha")
         for c in ["renta", "capital", "total", "vp"] + [c for c in ("real", "usd") if c in T_]:
             T_[c] = T_[c] * k
@@ -895,12 +927,12 @@ with tabD:
                             ("minorista", "Minorista (BCRA)", VIOLETA, "--")]:
         x = Sv[col].dropna()
         ax.plot(x.index, x.values, color=c, ls=ls, lw=1.6 if ls == "-" else 1.1, label=nom)
-    ax.set_ylabel("$ por dólar"); ax.legend(fontsize=8, ncol=4); ax.grid(alpha=.25); fig.tight_layout(); st.pyplot(fig)
+    ax.set_ylabel("$ por dólar"); ax.legend(fontsize=8, ncol=4); ax.grid(alpha=.25); fig.tight_layout(); ver_grafico(fig)
     fig, ax = plt.subplots(figsize=(11, 2.8))
     for col, nom, c in [("canje", "Canje (cable / MEP)", "black"), ("brecha_mep", "Brecha MEP vs A3500", AZUL), ("brecha_cable", "Brecha cable vs A3500", "#eb6834")]:
         x = Sv[col].dropna()
         ax.plot(x.index, x.values * 100, color=c, lw=1.5 if col == "canje" else 1.1, label=nom)
-    ax.axhline(0, color=GRIS, ls="--", lw=.8); ax.set_ylabel("%"); ax.legend(fontsize=8, ncol=3); ax.grid(alpha=.25); fig.tight_layout(); st.pyplot(fig)
+    ax.axhline(0, color=GRIS, ls="--", lw=.8); ax.set_ylabel("%"); ax.legend(fontsize=8, ncol=3); ax.grid(alpha=.25); fig.tight_layout(); ver_grafico(fig)
     st.caption("Canje = cable / MEP − 1: lo que cuesta pasar dólares del país al exterior. Brecha = dólar financiero / A3500 − 1.")
     v1, v2 = st.columns(2)
     with v1:
@@ -931,10 +963,14 @@ with tabD:
 
 # ── Licitaciones del Tesoro y calendario ──
 with tabL:
-    SUB, COL = L.resultados()
-    PR = L.proxima()
+    SUB, COL, PR, LINFO = cargar_licitaciones(en_vivo, date.today())
     st.subheader(f"Próxima licitación: {pd.Timestamp(PR['lic']):%d/%m/%Y}")
     st.caption(f"Llamado del {pd.Timestamp(PR['llamado']):%d/%m/%Y} · ofertas de {PR['hora']} hs · liquida el {pd.Timestamp(PR['liq']):%d/%m/%Y} · {PR['nota']}")
+    if LINFO["nuevas"]:
+        st.success("Se agregaron solas las licitaciones del " + ", ".join(f"{pd.Timestamp(x):%d/%m/%Y}" for x in LINFO["nuevas"])
+                   + " (comunicados de la Secretaría de Finanzas; premio calculado contra BYMA).")
+    elif en_vivo and LINFO["error"]:
+        st.caption(f"No se pudo consultar la Secretaría de Finanzas ({LINFO['error']}); se muestran los datos guardados.")
     menu = []
     for t, nom, paga, tipo, venc in PR["menu"]:
         k_ = next((k for k, _, _ in P.TIPOS if len(RP[k]) and t in RP[k].index), None)
@@ -949,8 +985,12 @@ with tabL:
             otro = f"piso {r_['piso']:.2%} {r_['piso_tipo']} · paga {r_['paga']}"
         menu.append({"ticker": t, "instrumento": f"{nom} ({tipo})", "paga": paga, "vence": venc, "precio": r_["precio"] if r_ is not None else np.nan,
                      "tirea": r_["tirea"] if r_ is not None and "tirea" in r_ else np.nan, "otro": otro})
-    mostrar(pd.DataFrame(menu).set_index("ticker"), {"precio": "{:,.2f}", "tirea": "{:.2%}"},
-            {"instrumento": "Instrumento", "paga": "Paga", "vence": "Vence", "precio": "Precio hoy", "tirea": "TIREA hoy", "otro": "Otro dato"})
+    if menu:
+        mostrar(pd.DataFrame(menu).set_index("ticker"), {"precio": "{:,.2f}", "tirea": "{:.2%}"},
+                {"instrumento": "Instrumento", "paga": "Paga", "vence": "Vence", "precio": "Precio hoy", "tirea": "TIREA hoy", "otro": "Otro dato"})
+    else:
+        st.info(f"Todavía no se publicó qué instrumentos se licitan. La app lo lee sola de la Secretaría de Finanzas apenas sale el llamado "
+                f"({pd.Timestamp(PR['llamado']):%d/%m/%Y}).")
     st.subheader("¿Las licitaciones pagan premio?")
     l1, l2, l3 = st.columns(3)
     fam_l = l1.selectbox("Tipo de instrumento", ["all"] + list(L.FAMILIAS), format_func=lambda f: "Todos" if f == "all" else L.FAMILIAS[f])
@@ -983,7 +1023,7 @@ with tabL:
         medl = Cg.groupby("fecha").apply(lambda g: valor(g).median())
         ax.plot(pd.to_datetime(medl.index), medl.values, color="black", lw=1, alpha=.6, label="Mediana de cada licitación")
         ax.axhline(0, color=GRIS, ls="--", lw=.8); ax.set_ylabel("Premio (pb)" if med_l == "pb" else "Premio (% del precio)")
-        ax.legend(fontsize=7, ncol=4); ax.grid(alpha=.2); fig.tight_layout(); st.pyplot(fig)
+        ax.legend(fontsize=7, ncol=4); ax.grid(alpha=.2); fig.tight_layout(); ver_grafico(fig)
     st.caption("Premio = TIREA de corte menos la TIREA del secundario al cierre del día de la licitación (BYMA, 24 hs), las dos con el mismo método. Positivo: el Tesoro "
                "pagó más que el mercado. Huecos: instrumentos nuevos, comparados contra la curva de su familia. Valores extremos recortados al percentil 2-98.")
     T_ = C_.sort_values(["fecha", "familia"], ascending=[False, True]).copy()
@@ -999,7 +1039,9 @@ with tabL:
              "tirea_al_liquidar": "TIREA al liquidar", "resultado_al_liquidar": "Resultado al liquidar"},
             calor={"premio_pb": "premio_pb", "premio_precio": "pct", "resultado_al_liquidar": "pct"})
     st.caption("Fuente: comunicados «Resultado de la licitación» de la Secretaría de Finanzas y planilla «Colocaciones de deuda» al 31/08/2026; "
-               "secundario: BYMA, cierres de 24 hs. Montos en millones de pesos (de dólares en los BONAR). Datos hasta la licitación del 28/09/2026.")
+               "secundario: BYMA, cierres de 24 hs. Montos en millones de pesos (de dólares en los BONAR). "
+               f"Datos hasta la licitación del {SUB['f'].max():%d/%m/%Y}; en vivo, cada 3 horas la app revisa la página de noticias de Finanzas y "
+               "agrega sola las licitaciones nuevas.")
 
     st.subheader("Calendario: licitaciones, cortes de cupón y vencimientos")
     hoy_c = max(date.today(), D["fecha"])
@@ -1085,13 +1127,13 @@ with tab2:
                "n/a: el CER hasta el vencimiento ya está publicado; —: vence después de la LECAP/BONCAP más larga. REM: promedio del sendero del REM para "
                "esos mismos meses. La última columna repite el cálculo contra el precio de la letra con igual vencimiento (S30N6, S29E7, T30A7, T31Y7, T30J7).")
     if len(beb):
-        st.pyplot(grafico_be(cer_b, RB["max_cero"]))
+        ver_grafico(grafico_be(cer_b, RB["max_cero"]))
 
     st.subheader("Trayectoria de inflación mensual que descuenta el mercado")
     if T.empty or not (T["fuente"] == "Breakeven despejado").any():
         st.info("No hay bonos CER suficientes para despejar la trayectoria con esas opciones.")
     else:
-        st.pyplot(grafico_trayectoria(T))
+        ver_grafico(grafico_trayectoria(T))
         T2 = T.copy(); T2.index = [B.mes_corto(m) for m in T2.index]
         mostrar(T2[["inflacion", "tea", "fuente", "bono", "rem", "dif_rem_pb"]],
                 {"inflacion": "{:.2%}", "tea": "{:.1%}", "rem": "{:.2%}", "dif_rem_pb": "{:+.0f}"},
@@ -1134,7 +1176,7 @@ with tabR:
     ax.annotate(f"{num_ar(x.iloc[-1])} pb", (x.index[-1], x.iloc[-1]), xytext=(-60, 10), textcoords="offset points", fontsize=8)
     for f_, v_, txt in [(x.idxmax(), x.max(), "máximo"), (x.idxmin(), x.min(), "mínimo")]:
         ax.annotate(f"{txt} {num_ar(v_)}", (f_, v_), xytext=(0, 8 if txt == "máximo" else -14), textcoords="offset points", fontsize=7, ha="center", color=GRIS)
-    ax.set_ylabel("Puntos básicos"); ax.grid(alpha=.25); fig.tight_layout(); st.pyplot(fig)
+    ax.set_ylabel("Puntos básicos"); ax.grid(alpha=.25); fig.tight_layout(); ver_grafico(fig)
     st.markdown("**Qué es.** Es la diferencia entre lo que rinden los bonos del gobierno argentino en dólares y lo que rinden los bonos del Tesoro de "
                 "Estados Unidos, que se toman como libres de riesgo. Lo calcula JP Morgan (índice EMBI) y se mide en puntos básicos: "
                 f"100 pb = 1 punto porcentual. Con {num_ar(u)} pb, un bono argentino rinde unos {u / 100:.1f} puntos más por año que uno de EE.UU.\n\n"
@@ -1164,7 +1206,7 @@ with tabR:
     ax.plot(g, np.interp(g, UST.index, UST.values) * 100, color="black", lw=1.5, label="Tesoro de EE.UU. (curva par)")
     for t_, x_, y_ in zip(SP.index, mac, SP["tir"]):
         ax.vlines(x_, np.interp(x_, UST.index, UST.values) * 100, y_ * 100, color=GRIS, lw=0.6, alpha=.6)
-    ax.set_xlabel("Duración (años)"); ax.set_ylabel("Tasa anual %"); ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); st.pyplot(fig)
+    ax.set_xlabel("Duración (años)"); ax.set_ylabel("Tasa anual %"); ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); ver_grafico(fig)
     mostrar(SP[["familia", "tir", "md", "ust", "spread_pb"]].sort_values("spread_pb"),
             {"tir": "{:.2%}", "md": "{:.2f}", "ust": "{:.2%}", "spread_pb": "{:+.0f}"},
             {"familia": "Familia", "tir": "TIR", "md": "MD", "ust": "Tesoro EE.UU. al mismo plazo", "spread_pb": "Spread (pb)"})
@@ -1209,7 +1251,7 @@ with tabFU:
         ax.scatter(pd.to_datetime(dlb.loc[ok, "vence"]), dlb.loc[ok, "dolar_be"], color=VERDE, zorder=4, s=30, label="Dólar breakeven de cada dólar linked")
         etiquetar(ax, pd.to_datetime(dlb.loc[ok, "vence"]), dlb.loc[ok, "dolar_be"], dlb.index[ok])
     ax.scatter([pd.Timestamp(f_fut)], [spot_f], color="black", zorder=5, label="A3500 hoy")
-    ax.set_ylabel("Pesos por dólar"); ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); st.pyplot(fig)
+    ax.set_ylabel("Pesos por dólar"); ax.grid(alpha=.25); ax.legend(fontsize=8); fig.tight_layout(); ver_grafico(fig)
 
     fig, ax = plt.subplots(figsize=(11, 3.2))
     xi = np.arange(len(TF)); w = .38
@@ -1220,7 +1262,7 @@ with tabFU:
         ax.plot(np.interp(dl_ok["dias"], TF["dias"], xi), dl_ok["deval_mensual"] * 100, color=VERDE, marker="D", ms=4, lw=1, label="Implícita en dólar linked")
     ax.set_xticks(xi, TF["contrato"].str.replace("DLR/", ""), fontsize=8); ax.set_ylabel("% mensual"); ax.grid(alpha=.25, axis="y")
     ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, frameon=False)
-    fig.tight_layout(); st.pyplot(fig)
+    fig.tight_layout(); ver_grafico(fig)
     mostrar(TF.set_index("contrato")[["vence", "dias", "ajuste", "dev_directa", "tna", "tasa_a3", "tea", "mensual", "fwd_mensual", "techo", "dist_techo", "usd_cubierta", "volumen", "interes_abierto"]],
             {"vence": "{:%d/%m/%Y}", "dias": "{:.0f}", "ajuste": "{:,.1f}", "dev_directa": "{:+.2%}", "tna": "{:.1%}", "tasa_a3": "{:.1%}", "tea": "{:.1%}",
              "mensual": "{:.2%}", "fwd_mensual": "{:.2%}", "techo": "{:,.0f}", "dist_techo": "{:+.1%}", "usd_cubierta": "{:.1%}", "volumen": "{:,.0f}", "interes_abierto": "{:,.0f}"},
@@ -1244,7 +1286,8 @@ with tabFU:
 # ── Obligaciones negociables (data912) ──
 with tabN:
     mep_on = dolar_bono("AL30D")
-    TO = X.tabla_ons(ONS, mep_on)
+    FICH = cargar_fichas_ons(en_vivo, tuple(sorted(set(ONS["raiz"])))) if len(ONS) else {}
+    TO = X.tabla_ons(ONS, mep_on, FICH)
     n1, n2, n3, n4 = st.columns(4)
     n1.metric("ONs con precio", f"{TO['precio_mep'].notna().sum()} en MEP", f"{len(TO)} en total", delta_color="off")
     n2.metric("Volumen en ONs", f"US$ {num_ar(TO['volumen_usd'].sum() / 1e6, 1)} M", "pesos, MEP y cable", delta_color="off")
@@ -1264,41 +1307,54 @@ with tabN:
     if busca:
         V_ = V_[V_.index.str.contains(busca.strip().upper(), regex=False)]
     V_ = V_.sort_values(orden, ascending=orden == "spread_puntas")
-    mostrar(V_.head(150)[["emisor", "precio_mep", "var", "precio_cable", "precio_pesos", "mep_implicito", "canje", "spread_puntas", "volumen_usd"]],
-            {"precio_mep": "{:.2f}", "var": "{:+.2%}", "precio_cable": "{:.2f}", "precio_pesos": "{:,.0f}", "mep_implicito": "{:,.2f}", "canje": "{:+.1%}",
-             "spread_puntas": "{:.2%}", "volumen_usd": "{:,.0f}"},
-            {"emisor": "Emisor", "precio_mep": "Precio MEP (D)", "var": "Var.", "precio_cable": "Precio cable (C)", "precio_pesos": "Precio $ (O)",
-             "mep_implicito": "MEP implícito", "canje": "Canje", "spread_puntas": "Spread compra-venta", "volumen_usd": "Volumen US$"}, calor={"var": "var"})
+    mostrar(V_.head(150)[["emisor", "vence", "cupon", "precio_mep", "var", "precio_cable", "precio_pesos", "mep_implicito", "canje", "spread_puntas", "volumen_usd"]],
+            {"vence": "{:%d/%m/%Y}", "cupon": "{:.2%}", "precio_mep": "{:.2f}", "var": "{:+.2%}", "precio_cable": "{:.2f}", "precio_pesos": "{:,.0f}",
+             "mep_implicito": "{:,.2f}", "canje": "{:+.1%}", "spread_puntas": "{:.2%}", "volumen_usd": "{:,.0f}"},
+            {"emisor": "Emisor", "vence": "Vence", "cupon": "Cupón", "precio_mep": "Precio MEP (D)", "var": "Var.", "precio_cable": "Precio cable (C)",
+             "precio_pesos": "Precio $ (O)", "mep_implicito": "MEP implícito", "canje": "Canje", "spread_puntas": "Spread compra-venta",
+             "volumen_usd": "Volumen US$"}, calor={"var": "var"})
     top = TO.sort_values("volumen_usd", ascending=False).head(15)[::-1]
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.barh([f"{t} · {e}" if e else t for t, e in zip(top.index, top["emisor"])], top["volumen_usd"] / 1e6, color=AZUL)
-    ax.set_xlabel("Volumen del día, millones de US$"); ax.grid(alpha=.25, axis="x"); fig.tight_layout(); st.pyplot(fig)
+    ax.set_xlabel("Volumen del día, millones de US$"); ax.grid(alpha=.25, axis="x"); fig.tight_layout(); ver_grafico(fig)
     st.caption(f"Fuente: {F_ONS}. Cada ON cotiza en tres monedas: terminada en O en pesos, en D en dólar MEP y en C en dólar cable, por 100 de "
-               "valor nominal. El emisor se muestra para los tickers verificados en informes de mercado (VALO); el resto, por su código.")
+               "valor nominal. Emisor, vencimiento y cupón: ficha técnica de BYMA de cada ON (las nuevas se consultan solas). Cupón vacío: tasa variable "
+               "o no informada en la ficha.")
 
     st.subheader("Calculadora de TIR de una ON")
-    st.caption("data912 publica precios pero no las condiciones de emisión. Cargá las del aviso de resultado o de la ficha técnica de BYMA "
-               "(cupón, frecuencia, vencimiento y cómo amortiza) y la app calcula la TIR y la duración al precio de hoy.")
+    st.caption("La app completa cupón, vencimiento y cuotas con la ficha técnica de BYMA; revisalos contra el prospecto (la ficha no siempre "
+               "informa la frecuencia de pago ni el cronograma de amortización) y la app calcula la TIR, la duración y la paridad al precio de hoy.")
     con_d = TO[TO["precio_mep"].notna()].sort_values("volumen_usd", ascending=False)
     if con_d.empty:
         st.info("Todavía no hay precios de ONs en dólares (antes de las 11 hs, o data912 no respondió). Probá de nuevo en un rato.")
     else:
         k1, k2, k3, k4, k5, k6 = st.columns([1.2, .8, .9, 1, .8, .8])
         on_sel = k1.selectbox("ON", con_d.index.tolist(), format_func=lambda t: f"{t}D · {TO.loc[t, 'emisor']}" if TO.loc[t, "emisor"] else f"{t}D")
-        cup = k2.number_input("Cupón anual %", 0.0, 30.0, 8.0, 0.125) / 100
-        frec = k3.selectbox("Paga", [2, 4, 12, 1], format_func={1: "anual", 2: "semestral", 4: "trimestral", 12: "mensual"}.get)
-        venc_on = k4.date_input("Vencimiento", date(2030, 6, 30), format="DD/MM/YYYY")
-        cuotas_on = k5.number_input("Cuotas de capital que faltan", 1, 40, 1, help="1 = paga todo al vencimiento (bullet).")
-        resid_on = k6.number_input("Residual por 100 VN", 1.0, 100.0, 100.0, 1.0)
+        fi_on = FICH.get(on_sel) or X.FICHAS.get(on_sel) or [None] * 9
         liq_on = B.liquidacion_24hs(date.today() if en_vivo else D["fecha"])
+        v_def = date.fromisoformat(fi_on[1]) if fi_on[1] and fi_on[1] > liq_on.isoformat() else date(2030, 6, 30)
+        cup = k2.number_input("Cupón anual %", 0.0, 30.0, float(fi_on[4]) if fi_on[4] is not None else 8.0, 0.125, key=f"on_cup_{on_sel}",
+                              help="De la ficha de BYMA." if fi_on[4] is not None else "La ficha no informa una tasa fija: cargala a mano.") / 100
+        frec = k3.selectbox("Paga", [2, 4, 12, 1], index=[2, 4, 12, 1].index(fi_on[6]) if fi_on[6] in (2, 4, 12, 1) else 0, key=f"on_frec_{on_sel}",
+                            format_func={1: "anual", 2: "semestral", 4: "trimestral", 12: "mensual"}.get)
+        venc_on = k4.date_input("Vencimiento", v_def, format="DD/MM/YYYY", key=f"on_venc_{on_sel}")
+        cuotas_on = k5.number_input("Cuotas de capital que faltan", 1, 60, int(fi_on[7]) if fi_on[7] else 1, key=f"on_cuo_{on_sel}",
+                                    help="1 = paga todo al vencimiento (bullet). La ficha da las cuotas totales: si ya pagó alguna, bajalo.")
+        resid_on = k6.number_input("Residual por 100 VN", 1.0, 100.0, 100.0, 1.0, key=f"on_res_{on_sel}")
         fl_on = X.flujos_on(venc_on, cup, frec, int(cuotas_on), liq_on, resid_on)
         px_on = float(TO.loc[on_sel, "precio_mep"])
         y_on, md_on = X.tir_on(px_on, fl_on, liq_on)
-        j1, j2, j3, j4 = st.columns(4)
+        ic_on = X.interes_corrido_on(venc_on, cup, frec, liq_on, resid_on)
+        j1, j2, j3, j4, j5 = st.columns(5)
         j1.metric("Precio MEP", f"{px_on:.2f}")
         j2.metric("TIR", f"{y_on:.2%}" if np.isfinite(y_on) else "–")
         j3.metric("Duración modificada", f"{md_on:.2f}" if np.isfinite(md_on) else "–")
-        j4.metric("Paridad (precio / residual)", f"{px_on / resid_on:.1%}")
+        j4.metric("Valor técnico", f"{resid_on + ic_on:.2f}", f"residual {resid_on:.0f} + corrido {ic_on:.2f}", delta_color="off",
+                  help="Valor residual más intereses corridos (base 30/360).")
+        j5.metric("Paridad técnica", f"{px_on / (resid_on + ic_on):.1%}", help="Precio sucio / valor técnico, como en la cátedra.")
+        if fi_on[0]:
+            st.caption(f"Ficha de BYMA: {fi_on[0]} · {fi_on[8]} · emitida el {pd.Timestamp(fi_on[2]):%d/%m/%Y} · moneda {fi_on[3]}"
+                       + (" · tasa variable" if fi_on[5] == "v" else "") if fi_on[2] else f"Ficha de BYMA: {fi_on[0]} · {fi_on[8]}")
         if fl_on:
             st.dataframe(pd.DataFrame(fl_on, columns=["Fecha", "Cupón", "Amortización"]).assign(Total=lambda t: t["Cupón"] + t["Amortización"])
                          .style.format({"Fecha": "{:%d/%m/%Y}", "Cupón": "{:.3f}", "Amortización": "{:.2f}", "Total": "{:.3f}"}), hide_index=True, height=220)
@@ -1393,7 +1449,7 @@ with tabPF:
         for g in [g for g in PF.GRUPOS if g in TC["tramos"].columns]:
             ax.bar(TC["tramos"].index, TC["tramos"][g] * 100, bottom=base, color=PF.COLORES_G[g], label=PF.GRUPOS[g]); base += TC["tramos"][g].values * 100
         ax.set_ylabel("% del valor"); ax.set_xlabel("Vencimiento"); ax.grid(alpha=.25, axis="y"); ax.legend(fontsize=8, ncol=6, loc="upper center", bbox_to_anchor=(.5, 1.18), frameon=False)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         st.caption(f"**{TC['tipo']}**: {TC['explicacion']} Se clasifica por el vencimiento de cada bono, pesado por su valor. Los bonos que amortizan en "
                    "cuotas (AL30, GD35…) cobran antes del vencimiento: su riesgo real por plazo está en las key rate durations.")
 
@@ -1410,7 +1466,7 @@ with tabPF:
             ax.set_xlim(0, 115); ax.set_title(titulo, fontsize=10); ax.tick_params(labelsize=8); ax.set_xticks([])
             for sp in ("top", "right", "bottom"):
                 ax.spines[sp].set_visible(False)
-            fig.tight_layout(); col.pyplot(fig)
+            fig.tight_layout(); ver_grafico(fig, col)
 
         st.subheader("Duración y key rate durations")
         KR = PF.krd_cartera(CPF)
@@ -1420,7 +1476,7 @@ with tabPF:
         for g in gk:
             ax.bar(KR.index, KR[g], bottom=base, color=PF.COLORES_G[g], label=PF.GRUPOS[g]); base += KR[g].values
         ax.set_ylabel("Key rate duration (años)"); ax.set_xlabel("Plazo (nodo de la curva)"); ax.grid(alpha=.25, axis="y"); ax.legend(fontsize=8)
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         KRt = KR[gk + ["total", "dv01"]].copy(); KRt.loc["Total"] = KRt.sum()
         mostrar(KRt, {**{g: "{:.3f}" for g in gk}, "total": "{:.3f}", "dv01": f"{mon} {{:,.0f}}"}, {**{g: PF.GRUPOS[g] for g in gk}, "total": "Total", "dv01": "DV01"})
         st.caption(GLOSARIO_PF["Key rate durations (KRD)"] + " La suma de las barras es la duración de la cartera. TAMAR y duales llevan duración efectiva "
@@ -1452,7 +1508,7 @@ with tabPF:
         fig, ax = plt.subplots(figsize=(11, 3))
         ax.bar(ap.index, ap.values, color=[VERDE if v >= 0 else ROJO for v in ap.values])
         ax.axhline(0, color="black", lw=.8); ax.set_ylabel(mon); ax.set_xlabel("Qué plazo explica el resultado (KRD × shock)"); ax.grid(alpha=.25, axis="y")
-        fig.tight_layout(); st.pyplot(fig)
+        fig.tight_layout(); ver_grafico(fig)
         mostrar(EPF.assign(grupo=EPF["grupo"].map(PF.GRUPOS))[["grupo", "valor", "cambio", "impacto", "pct_impacto"]].sort_values("impacto"),
                 {"valor": "{:,.0f}", "cambio": "{:+.2%}", "impacto": "{:+,.0f}", "pct_impacto": "{:.1%}"},
                 {"grupo": "Grupo", "valor": f"Valor hoy {mon}", "cambio": "Cambio de precio", "impacto": f"Impacto {mon}", "pct_impacto": "% del impacto"},
@@ -1474,7 +1530,10 @@ with tabPF:
         hz = v2.selectbox("Horizonte", [1, 5, 10], format_func=lambda h: f"{h} día" + ("s" if h > 1 else ""), key="pf_hz")
         vent = v3.selectbox("Ventana", [250, 500, 120], format_func=lambda w: f"{w} ruedas", key="pf_vent")
         sims = tuple(sorted({UPF[t]["simbolo"] for t in CPF.index} | {"AL30", "AL30D" if moneda != "ccl" else "AL30C"}))
-        H_, FH_ = historicos_pf(en_vivo, sims)
+        hist_vivo = en_vivo and st.toggle("Usar el histórico actualizado de BYMA", value=False, key="pf_hist_vivo",
+                                          help="Apagado: precios diarios guardados hasta el 09/10/2026 (carga al instante). Prendido: baja de BYMA el "
+                                               "histórico de cada bono de la cartera, de a uno (tarda unos segundos por bono).")
+        H_, FH_ = historicos_pf(hist_vivo, sims)
         RPF, rell = PF.retornos(UPF, CPF, H_, moneda_pf, ("AL30", "AL30C" if moneda == "ccl" else "AL30D"))
         if RPF.empty or len(RPF) < 30:
             st.info("No hay suficiente historia de precios para estimar el VaR de esta cartera.")
@@ -1494,7 +1553,7 @@ with tabPF:
                 ax.axvline(-VR["var"] / esc_m, color=ROJO, lw=1.6, label=f"VaR {conf:.0%}")
                 ax.axvline(-VR["es"] / esc_m, color=ROJO, lw=1, ls="--", label="Expected shortfall")
                 ax.set_xlabel(f"Resultado de la cartera de hoy en {hz} día{'s' if hz > 1 else ''} ({mon}{u_m})"); ax.set_ylabel("Días"); ax.legend(fontsize=8); ax.grid(alpha=.25)
-                fig.tight_layout(); st.pyplot(fig)
+                fig.tight_layout(); ver_grafico(fig)
             with cv2:
                 PBv = VR["por_bono"].copy()
                 PBv["datos"] = ["propios" if t not in rell or not rell[t][1] else "propios + " + ", ".join(rell[t][1]) for t in PBv.index]
@@ -1514,46 +1573,85 @@ with tabPF:
 
 # ── 4. LLM ──
 with tab4:
-    st.subheader("Resumen ejecutivo")
-    st.caption("El LLM solo redacta: recibe los números ya calculados en un JSON y tiene prohibido inventar datos.")
+    st.subheader("Informe semanal con IA")
+    st.caption("Arma un PDF con el resumen ejecutivo de cómo se movieron en la última semana los precios y las tasas de los bonos, el dólar, el "
+               "riesgo país, la TAMAR y la licitación del Tesoro. La app calcula todos los números (último cierre contra el de una semana antes) "
+               "y un modelo de lenguaje (Claude) solo los redacta: recibe un JSON y tiene prohibido inventar datos. Sin clave, el texto sale de una "
+               "plantilla con los mismos números.")
     try:  # publicada en Streamlit Community Cloud, la clave se guarda en Settings › Secrets y no hace falta escribirla
         clave_guardada = st.secrets.get("ANTHROPIC_API_KEY", "")
     except Exception:
         clave_guardada = ""
     if clave_guardada:
         os.environ["ANTHROPIC_API_KEY"] = clave_guardada
-        st.caption("Clave de Anthropic cargada desde los Secrets de la app.")
+        st.caption("Clave de Anthropic cargada desde los Secrets de la app: el texto lo redacta Claude.")
         clave = ""
     else:
-        clave = st.text_input("ANTHROPIC_API_KEY (opcional)", type="password", help="Sin clave se usa una plantilla determinística.")
-    if st.button("Generar resumen"):
+        clave = st.text_input("ANTHROPIC_API_KEY (opcional)", type="password", help="Sin clave se usa una plantilla determinística con los mismos números.")
+    if st.button("Generar el informe de la semana", type="primary"):
         if clave:
             os.environ["ANTHROPIC_API_KEY"] = clave
-        senal = B.senales_fija_vs_cer(D, curva, tabla_be)                       # retorno de cada par si se cumple el REM
-        fw_fija = M.forwards(RP, "fija", 14)
-        fw_usd = M.forwards(RP, "tesoro", 90, tabla_usd)
-        extra = {"tasas_forward": {
-            "pesos_tasa_fija_TEM_%": {k: round(float(v) * 100, 2) for k, v in fw_fija["fwd_mensual"].items()},
-            f"dolares_tesoro_anual_%_{'cable' if moneda == 'ccl' else 'mep'}": {k: round(float(v) * 100, 2) for k, v in fw_usd["fwd_anual"].items()}}}
-        T0 = P.trayectoria_be(RP0)
-        comp_be = pd.DataFrame({"mercado": T0["inflacion"].where(T0["fuente"] != "INDEC (publicado)"), "rem": T0["rem"]}).dropna(subset=["mercado"])
-        be_ctx = BE0[["be_mensual", "rem_mensual"]].rename(columns={"rem_mensual": "be_rem_mensual"})
-        rp_1m = float(RIESGO[RIESGO.index <= RIESGO.index[-1] - pd.DateOffset(months=1)].iloc[-1])
-        UST_c, _, _ = cargar_ust(en_vivo, D["fecha"])
-        sp_g = X.spread_ust(tabla_usd, UST_c)
-        extra["riesgo_pais"] = {"pb": int(RIESGO.iloc[-1]), "fecha": f"{RIESGO.index[-1]:%d/%m/%Y}", "cambio_1m_pb": int(RIESGO.iloc[-1] - rp_1m),
-                                "spread_globales_pb": int(round(sp_g.loc[sp_g["familia"] == "Globales", "spread_pb"].median()))}
-        tc_s = DP["a3500"].sort_index()
-        sp_f = float(tc_s[tc_s.index <= pd.Timestamp(FUT["fecha"].iloc[0])].iloc[-1])
-        TFc = X.devaluacion_futuros(FUT, sp_f, FUT["fecha"].iloc[0])
-        dic_ = TFc[TFc["vence"].map(lambda v: v.month == 12)]
-        fila_f = dic_.iloc[0] if len(dic_) else TFc.iloc[-1]
-        extra["dolar_futuro"] = {"a3500": round(sp_f, 2), "contrato": fila_f["contrato"], "precio": round(float(fila_f["ajuste"]), 1),
-                                 "devaluacion_%": round(float(fila_f["dev_directa"]) * 100, 2), "mensual_%": round(float(fila_f["mensual"]) * 100, 2)}
-        ctx = B.contexto_resultados(tabla_usd, be_ctx, comp_be, senal, fecha=D["fecha"], extra=extra)
+        with st.spinner("Bajando los cierres de la última semana de cada bono y armando el PDF… (en vivo tarda unos 20 segundos)"):
+            S_ = informe_semana(en_vivo, date.today())
+            extra_ = {}
+            try:
+                tc_s = DP["a3500"].sort_index()
+                sp_f = float(tc_s[tc_s.index <= pd.Timestamp(FUT["fecha"].iloc[0])].iloc[-1])
+                TFc = X.devaluacion_futuros(FUT, sp_f, FUT["fecha"].iloc[0])
+                dic_ = TFc[TFc["vence"].map(lambda v: v.month == 12)]
+                fila_f = dic_.iloc[0] if len(dic_) else TFc.iloc[-1]
+                extra_["dolar_futuro"] = {"a3500": round(sp_f, 2), "contrato": fila_f["contrato"], "precio": round(float(fila_f["ajuste"]), 1),
+                                          "devaluacion_%": round(float(fila_f["dev_directa"]) * 100, 2), "mensual_%": round(float(fila_f["mensual"]) * 100, 2)}
+            except Exception:
+                pass
+            try:
+                T0 = P.trayectoria_be(RP0)
+                fut_be = T0[T0["fuente"] != "INDEC (publicado)"]["inflacion"].head(4)
+                extra_["breakeven_proximos_meses_%"] = {B.mes_corto(m): round(float(v) * 100, 2) for m, v in fut_be.items()}
+                rem_ = T0.loc[fut_be.index, "rem"].dropna()
+                extra_["rem_mismos_meses_%"] = {B.mes_corto(m): round(float(v) * 100, 2) for m, v in rem_.items()}
+            except Exception:
+                pass
+            try:
+                UST_c, _, _ = cargar_ust(en_vivo, D["fecha"])
+                sp_g = X.spread_ust(tabla_usd, UST_c)
+                extra_["spread_globales_vs_tesoro_eeuu_pb"] = int(round(sp_g.loc[sp_g["familia"] == "Globales", "spread_pb"].median()))
+            except Exception:
+                pass
+            try:
+                extra_["proxima_licitacion"] = f"{pd.Timestamp(PR['lic']):%d/%m/%Y}" + (" (" + ", ".join(m[0] for m in PR["menu"]) + ")" if PR["menu"] else "")
+            except Exception:
+                pass
+            ctx_ = {**S_["contexto"], **extra_}
+            texto_, origen_ = I.redactar(ctx_)
+            pdf_ = I.pdf(S_, texto_, origen_)
+            st.session_state["informe"] = {"texto": texto_, "origen": origen_, "pdf": pdf_, "ctx": ctx_, "ini": S_["ini"], "fin": S_["fin"],
+                                           "ind": S_["indicadores"], "tabla": S_["tabla"]}
+    INF = st.session_state.get("informe")
+    if INF:
+        st.markdown(f"**Semana del {INF['ini']:%d/%m/%Y} al {INF['fin']:%d/%m/%Y}** · {INF['ctx']['semana']['precios']} · texto: {INF['origen']}")
+        cols_ = st.columns(4)
+        for c_, (k, fmt, unidad) in zip(cols_, [("riesgo_pais", lambda v: f"{v:.0f} pb", "pb"), ("mep", lambda v: f"$ {num_es(v)}", "$"),
+                                                ("tir_soberanos", lambda v: f"{num_es(v)}%", "pp"), ("tirea_fija", lambda v: f"{num_es(v)}%", "pp")]):
+            v = INF["ind"].get(k)
+            if v and np.isfinite(v["fin"]) and np.isfinite(v["inicio"]):
+                d_ = (f"{(v['fin'] / v['inicio'] - 1):+.2%}" if unidad == "$" else f"{v['fin'] - v['inicio']:+.0f} pb" if unidad == "pb"
+                      else f"{(v['fin'] - v['inicio']) * 100:+.0f} pb")
+                c_.metric(v["nombre"], fmt(v["fin"]), d_, delta_color="inverse" if k in ("riesgo_pais", "tir_soberanos", "tirea_fija") else "normal")
+        st.download_button("Descargar el informe en PDF", INF["pdf"], file_name=f"BondAI_informe_semanal_{INF['fin']:%Y%m%d}.pdf", mime="application/pdf",
+                           type="primary", on_click="ignore")
+        for par in [x.strip() for x in INF["texto"].split("\n\n") if x.strip()]:
+            m_ = re.match(r"^([^:]{3,40}):\s*(.*)$", par, re.S)
+            st.markdown((f"**{m_.group(1)}:** {m_.group(2)}" if m_ else par).replace("$", "\\$"))
+        with st.expander("Bonos de la semana (precio y tasa al inicio y al final)"):
+            Tw = INF["tabla"]
+            if len(Tw):
+                mostrar(Tw.sort_values(["grupo", "var"]), {"precio_ini": "{:,.2f}", "precio_fin": "{:,.2f}", "var": "{:+.2%}", "tasa_ini": "{:.2%}",
+                                                           "tasa_fin": "{:.2%}", "var_pb": "{:+.0f}", "md": "{:.2f}"},
+                        {"grupo": "Tipo", "precio_ini": f"Precio {INF['ini']:%d/%m}", "precio_fin": f"Precio {INF['fin']:%d/%m}", "var": "Var. precio",
+                         "tasa_ini": f"Tasa {INF['ini']:%d/%m}", "tasa_fin": f"Tasa {INF['fin']:%d/%m}", "var_pb": "Cambio tasa (pb)", "md": "MD"},
+                        calor={"var": "var"})
         with st.expander("Contexto enviado al modelo (JSON)"):
-            st.json(ctx)
-        try:
-            st.markdown(B.resumen_llm(ctx).replace("$", "\\$")); st.caption("Generado por Claude (API de Anthropic).")
-        except Exception as e:
-            st.markdown(B.resumen_plantilla(ctx).replace("$", "\\$")); st.caption(f"Plantilla de respaldo ({e}).")
+            st.json(INF["ctx"])
+    else:
+        st.info("Tocá «Generar el informe de la semana». Después aparece el botón para descargar el PDF.")

@@ -8,3 +8,4 @@ requests
 openpyxl
 streamlit>=1.40
 anthropic
+reportlab>=4.0

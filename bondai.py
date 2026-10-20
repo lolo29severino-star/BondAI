@@ -231,8 +231,9 @@ def metricas_bono(b, liq, precio):
     mac = float(np.sum(t * vp) / precio)
     residual = 100 - sum(a for f, _, a in b["flujos"] if f <= liq)
     ic = next((res * tasa * d360(ini, liq) / 360 for ini, fin, tasa, res in b["periodos"] if ini <= liq < fin), 0.0)
+    cupon = next((res * tasa for ini, fin, tasa, res in b["periodos"] if ini <= liq < fin), 0.0)      # cupón anual vigente por 100 VN
     return {"precio": precio, "tir": y, "md": mac / (1 + y), "convexidad": float(np.sum(t * (t + 1) * vp) / (precio * (1 + y) ** 2)),
-            "residual": residual, "ic": ic, "vt": residual + ic, "paridad": precio / (residual + ic)}
+            "residual": residual, "ic": ic, "vt": residual + ic, "paridad": precio / (residual + ic), "current_yield": cupon / precio}
 
 
 def nelson_siegel(m, b0, b1, b2, tau):

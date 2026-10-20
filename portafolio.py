@@ -244,7 +244,7 @@ def paralelos(U, C, saltos=(-1000, -500, -100, 100, 500, 1000)):
 def _historico(sesion, simbolo, desde, hasta):
     ts = lambda d: int(datetime(d.year, d.month, d.day, tzinfo=timezone(timedelta(hours=-3))).timestamp())
     r = sesion.get(f"{BYMA_API}/chart/historical-series/history", params={"symbol": simbolo + " 24HS", "resolution": "D",
-                   "from": ts(desde), "to": ts(hasta) + 86400}, verify=False, timeout=20)
+                   "from": ts(desde), "to": ts(hasta) + 86400}, verify=False, timeout=(5, 12))
     r.raise_for_status()
     j = r.json()
     if j.get("s") != "ok":
@@ -271,7 +271,7 @@ def historicos(simbolos, usar_api=True, dias=760):
     for s in simbolos:
         serie = pd.Series(dtype=float)
         if ses is not None:
-            for intento in range(2):
+            for intento in range(1):
                 try:
                     serie = _historico(ses, s, desde, hasta); break
                 except Exception:
