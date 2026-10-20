@@ -1,6 +1,6 @@
 # BondAI · Renta fija argentina con IA
 
-Aplicación en Streamlit que baja precios de BYMA y series del BCRA, calcula curvas, tasas forward (en pesos y en dólares), breakeven, flujos, dólares y premios de licitación, y redacta un resumen con IA. El pronóstico de inflación con machine learning y el Monte Carlo están en el notebook.
+Aplicación en Streamlit que baja precios de BYMA, series del BCRA, futuros de dólar de A3 (ex Matba Rofex), riesgo país (ArgentinaDatos), la curva del Tesoro de EE.UU. y las obligaciones negociables (data912). Calcula curvas, inflación breakeven, devaluación esperada, tasas forward, flujos, dólares y premios de licitación; arma tu propio portafolio con su riesgo (duración, key rate durations, escenarios de tasas y VaR) y redacta un resumen con IA. El pronóstico de inflación con machine learning y el Monte Carlo están en el notebook.
 
 Herramienta académica (Programación para Economistas, UCA). No es recomendación de inversión.
 
@@ -21,7 +21,9 @@ Se abre en http://localhost:8501.
 2. Arriba a la derecha: **+** › **New repository**.
 3. Nombre: `bondai`. Dejalo en **Public** (también funciona en Private). Tocá **Create repository**.
 4. En la página del repositorio vacío, tocá **uploading an existing file**.
-5. Arrastrá estos 8 archivos: `app.py`, `bondai.py`, `pesos.py`, `mercado.py`, `dolares.py`, `licitaciones.py`, `requirements.txt` y este `README.md`.
+5. Arrastrá estos 10 archivos: `app.py`, `bondai.py`, `pesos.py`, `mercado.py`, `dolares.py`, `licitaciones.py`, `externos.py`, `portafolio.py`, `requirements.txt` y este `README.md`.
+
+   **Si ya tenías la app publicada**: subí todos los archivos juntos (GitHub los reemplaza) y después, en la app, **Manage app** › ⋮ › **Reboot app**. Si subís solo `app.py`, va a fallar porque busca funciones que están en los otros archivos.
 6. Abajo, **Commit changes**.
 
 ### 2. Publicar la app
@@ -48,7 +50,8 @@ Se abre en http://localhost:8501.
 - El botón **Actualizar datos ahora** de la barra lateral los baja en el momento.
 - El interruptor **Actualizar sola cada 15 minutos** los renueva solo mientras la página está abierta.
 - La barra lateral dice a qué hora se bajaron los datos y de qué fuente salió cada parte (API o respaldo).
-- Si BYMA o el BCRA no responden, la app usa el respaldo del 09/10/2026 y lo avisa.
+- Si BYMA o el BCRA no responden, la app usa el respaldo del 09/10/2026 y lo avisa (las ONs, el del 19/10/2026).
+- Futuros de A3, riesgo país, Tesoro de EE.UU. y ONs se bajan de sus propias APIs públicas; las ONs se renuevan cada 5 minutos.
 
 ### 4. Cosas a tener en cuenta
 

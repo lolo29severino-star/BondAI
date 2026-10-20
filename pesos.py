@@ -13,6 +13,7 @@ import base64
 import json
 import zlib
 from datetime import date, timedelta
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -277,6 +278,46 @@ def _interp(nodos, x):
     return np.nan
 
 
+MODELOS_CURVA = {"auto": "Automática (mejor ajuste)", "lineal": "Lineal", "log": "Logarítmica", "raiz": "Raíz cuadrada",
+                 "cuad": "Cuadrática", "ns": "Nelson-Siegel", "interp": "Interpolada entre bonos"}
+
+
+def ajustar_curva(pts, modelo="auto"):
+    """Ajusta una curva tasa = f(años) a los puntos [(años, tasa)].
+
+    Modelos: lineal (a + b·t), logarítmica (a + b·ln t), raíz cuadrada (a + b·√t), cuadrática (a + b·t + c·t²) y Nelson-Siegel.
+    'auto' elige el de menor AIC = n·ln(SCE/n) + 2k: premia ajustar bien pero castiga cada parámetro de más, porque con
+    pocos bonos el modelo más flexible siempre pasa más cerca de los puntos y predice peor entre ellos.
+    'interp' une los puntos con rectas (sin ajuste). Devuelve (función, nombre, error medio en pb, {modelo: error en pb})."""
+    pts = sorted((float(a), float(b)) for a, b in pts if np.isfinite(a) and np.isfinite(b))
+    n = len(pts)
+    if n == 0:
+        return None, "", np.nan, {}
+    x, y = np.array([max(a, 1e-4) for a, _ in pts]), np.array([b for _, b in pts])
+    if modelo == "interp" or n < 3:
+        return (lambda t: _interp(pts, t)), MODELOS_CURVA["interp"], 0.0, {}
+
+    def mc(cols):
+        b, *_ = np.linalg.lstsq(np.column_stack(cols), y, rcond=None)
+        return b
+    c = {}
+    b = mc([np.ones(n), x]); c["lineal"] = (lambda t, b=b: b[0] + b[1] * t, 2)
+    b = mc([np.ones(n), np.log(x)]); c["log"] = (lambda t, b=b: b[0] + b[1] * np.log(max(t, 1e-4)), 2)
+    b = mc([np.ones(n), np.sqrt(x)]); c["raiz"] = (lambda t, b=b: b[0] + b[1] * np.sqrt(max(t, 0.0)), 2)
+    if n >= 4:
+        b = mc([np.ones(n), x, x ** 2]); c["cuad"] = (lambda t, b=b: b[0] + b[1] * t + b[2] * t * t, 3)
+    if n >= 5:
+        f = ajustar_ns(list(zip(x, y)))
+        if f:
+            c["ns"] = (f, 4)
+    est = {}
+    for k, (f, npar) in c.items():
+        sce = float(sum((f(a) - v) ** 2 for a, v in zip(x, y)))
+        est[k] = (np.sqrt(sce / n) * 1e4, n * np.log(sce / n + 1e-14) + 2 * npar)
+    elegido = modelo if modelo in c else min(est, key=lambda k: est[k][1])
+    return c[elegido][0], MODELOS_CURVA[elegido], est[elegido][0], {MODELOS_CURVA[k]: v[0] for k, v in est.items()}
+
+
 tem_tamar = lambda tna: (1 + tna / 100 * 32 / 365) ** (365 / 32 / 12) - 1
 tir_de = lambda pago, P, d: (pago / P) ** (365 / d) - 1 if P > 0 and d > 0 else np.nan
 mens = lambda y: (1 + y) ** (30 / 365) - 1
@@ -294,27 +335,41 @@ def _cer_en(cer, f):
     return float(cer[cer.index <= f].iloc[-1])
 
 
+@lru_cache(maxsize=4096)
+def _ventanas(desde, hasta):
+    """Exponentes del IPC de cada mes entre 'desde' (excluido) y 'hasta': ((mes de IPC, días / días de la ventana), ...)."""
+    cuenta, f = {}, pd.Timestamp(desde)
+    fin = pd.Timestamp(hasta)
+    while f < fin:
+        f += pd.Timedelta(days=1)
+        ventana = pd.Period(f, "M") - (0 if f.day >= 16 else 1)
+        k = (str(ventana - 1), ventana.days_in_month)
+        cuenta[k] = cuenta.get(k, 0) + 1
+    return tuple((m, n / dm) for (m, dm), n in cuenta.items())
+
+
 def _proyectar_cer(cer, hasta, ipc):
-    """CER proyectado con la regla del BCRA: del 16 del mes m al 15 del m+1 crece (1 + IPC de m-1)^(1/días del mes m)."""
+    """CER proyectado con la regla del BCRA: del 16 del mes m al 15 del m+1 crece (1 + IPC de m-1)^(1/días del mes m).
+    Se agrupan los días por mes de IPC (cacheado), así que cada proyección cuesta unas pocas multiplicaciones."""
     hasta = pd.Timestamp(hasta)
     if hasta <= cer.index[-1]:
         return _cer_en(cer, hasta)
-    f, v = cer.index[-1], float(cer.iloc[-1])
-    while f < hasta:
-        f += pd.Timedelta(days=1)
-        ventana = pd.Period(f, "M") - (0 if f.day >= 16 else 1)
-        v *= (1 + ipc(str(ventana - 1))) ** (1 / ventana.days_in_month)
+    v = float(cer.iloc[-1])
+    for m, e in _ventanas(cer.index[-1].date(), hasta.date()):
+        v *= (1 + ipc(m)) ** e
     return v
 
 
 # ── cálculo principal ──
-def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicado=None, rem_mensual=None, dev=None, margenes=None):
+def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicado=None, rem_mensual=None, dev=None, margenes=None, curva_be="auto"):
     """Devuelve un DataFrame por tipo de bono y los supuestos usados.
     plazo: 'CI' o '24HS'. precio: 'px' (VWAP), 'last' (último) o 'prev' (cierre anterior).
     tamar: TAMAR futura supuesta (TNA %, por defecto el promedio de las últimas 5 ruedas).
     infl: inflación mensual (decimal) después del último mes del REM.
     dev: devaluación mensual esperada (decimal) para dólar linked y TMVE8; None = la implícita en la curva.
-    margenes: dict ticker -> margen TAMAR (puntos de TNA) para reemplazar el de la licitación."""
+    margenes: dict ticker -> margen TAMAR (puntos de TNA) para reemplazar el de la licitación.
+    curva_be: curva de tasa fija contra la que se despeja la inflación breakeven de cada CER: 'auto' (mejor ajuste, como
+    Bonerío Local), un modelo de MODELOS_CURVA o 'interp' (rectas entre las LECAP/BONCAP)."""
     clave, idx = ("t0" if plazo == "CI" else "t1"), {"px": 0, "last": 1, "prev": 2}[precio]
     s = datos["fecha"] if plazo == "CI" else siguiente_habil(datos["fecha"])
     cer, tam, tc = datos["cer"], datos["tamar"].sort_index(), datos["a3500"].sort_index()
@@ -381,6 +436,19 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
     # tasa fija cupón cero (LECAP y BONCAP) por días, para la breakeven
     cero = sorted((r["dias"], r["tirea"]) for r in out["lecap"] + out["boncap"] if not pd.isna(r["pago_final"]))
     max_cero = cero[-1][0] if cero else 0
+    f_be, nombre_be, err_be, errores_be = ajustar_curva([(d / 365, y) for d, y in cero if d >= 15], curva_be)
+    tasa_be = (lambda d: f_be(d / 365)) if f_be else (lambda d: _interp(cero, d))
+    par_de = {r["vence"]: r for r in out["lecap"] + out["boncap"] if not pd.isna(r["pago_final"])}  # tasa fija cupón cero por vencimiento
+    be_aux = []
+
+    def despejar(vt, r1, pago_obj, fijos=None):
+        """Inflación mensual pareja para los meses de IPC no publicados (y no fijados en 'fijos') que iguala el pago del CER con pago_obj."""
+        pago_cer = lambda x: vt / cref * _proyectar_cer(cer, r1, lambda ym: ipc_pub.get(ym, (fijos or {}).get(ym, x)))
+        lo, hi = -0.05, 0.3
+        for _ in range(55):
+            mid = (lo + hi) / 2
+            lo, hi = (lo, mid) if pago_cer(mid) > pago_obj else (mid, hi)
+        return (lo + hi) / 2
     for t, (tipo, em, v, base, fl, cond, largo) in cerb.items():
         r = q(t); k = cref / base
         fut = [x for x in fl if x[0] > s]
@@ -404,13 +472,15 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
         elif not cero_cupon:
             nota = "bono con cupones"
         else:
-            pago_fija = r["precio"] * (1 + _interp(cero, hz)) ** (hz / 365)
-            pago_cer = lambda x: vt / cref * _proyectar_cer(cer, r1, lambda ym: ipc_pub.get(ym, x))
-            lo, hi = -0.05, 0.3
-            for _ in range(50):
-                mid = (lo + hi) / 2
-                lo, hi = (lo, mid) if pago_cer(mid) > pago_fija else (mid, hi)
-            be = (lo + hi) / 2
+            fija_be = tasa_be(hz)
+            pago_fija = r["precio"] * (1 + fija_be) ** (hz / 365)
+            be = despejar(vt, r1, pago_fija)
+            par = par_de.get(v)
+            pago_par = r["precio"] * (1 + par["tirea"]) ** (hz / 365) if par is not None else np.nan
+            be_par = despejar(vt, r1, pago_par) if par is not None else np.nan
+            r.update(fija_be=fija_be, par=par["ticker"] if par is not None else None, be_par=be_par)
+            be_aux.append({"ticker": t, "vence": v, "r1": r1, "vt": vt, "precio": r["precio"], "hz": hz,
+                           "pago_curva": pago_fija, "pago_par": pago_par, "par": par["ticker"] if par is not None else None})
         if d_fut >= 15:
             rem_m = (cp / float(cer.iloc[-1])) ** (30 / d_fut) - 1
         r.update(tipo=tipo, vence=v, dias=dias, valor_tecnico=vt, paridad=r["precio"] / vt, tir_real=y, tna_real=tna30(y), tna_nominal=tna30(tir_nom),
@@ -512,6 +582,67 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
 
     res = {k: (pd.DataFrame(v).sort_values("vence").set_index("ticker") if v else pd.DataFrame()) for k, v in out.items()}
     res.update(curva_fija=curva_fija, curva_cer=fit_cer, liq=s, tamar_hoy=tamar_hoy, tamar_sup=tamar, infl_sup=infl, tc_hoy=tc_hoy, tc_fecha=tc_fecha,
-               max_cero=max_cero, cer_ultimo=cer_ult, dev_sup=dev,
+               max_cero=max_cero, cer_ultimo=cer_ult, dev_sup=dev, curva_be=tasa_be, curva_be_nombre=nombre_be, curva_be_error_pb=err_be,
+               curva_be_errores=errores_be, be_aux=be_aux, despejar=despejar, cref=cref, ipc_pub=ipc_pub, rem=rem,
                flujos={t: pd.DataFrame(v) for t, v in flujos.items() if v})
     return res
+
+
+# ── trayectoria de inflación mensual implícita (como Chamomberg: "breakeven despejado" por tramos) ──
+def _dias_por_mes_ipc(desde, hasta):
+    """Días del CER posteriores a 'desde' y hasta 'hasta' que crecen con el IPC de cada mes ('AAAA-MM' -> días)."""
+    out, f = {}, pd.Timestamp(desde)
+    while f < pd.Timestamp(hasta):
+        f += pd.Timedelta(days=1)
+        m = str(pd.Period(f, "M") - (0 if f.day >= 16 else 1) - 1)
+        out[m] = out.get(m, 0) + 1
+    return out
+
+
+def trayectoria_be(res, anclas="mes_completo", contra="curva", min_meses=3, meses_publicados=3):
+    """Sendero de inflación mensual que descuenta el mercado, despejado bono por bono ("breakeven despejado").
+
+    Los CER cupón cero se ordenan por su fecha de referencia (vencimiento menos 10 hábiles). El primero fija una inflación
+    pareja para los meses sin IPC publicado que cubre; el siguiente toma esos meses como dados y despeja solo los meses
+    nuevos, y así sucesivamente: queda una inflación por tramos.
+    anclas: 'mes_completo' (solo los CER cuya fecha de referencia cierra un mes entero de IPC, el día 15: cada tramo queda
+    exactamente identificado, como en Chamomberg) o 'todos' (todos los CER; un mes que un bono cubre en menos de la mitad
+    pasa al bono siguiente, y un bono que trae menos de min_meses meses nuevos cede sus meses al siguiente, salvo el último).
+    contra: 'curva' (la curva de tasa fija ajustada al plazo del CER) o 'par' (solo los CER con una LECAP/BONCAP del mismo
+    vencimiento, contra el precio de esa letra)."""
+    ipc_pub, rem, despejar = res["ipc_pub"], res["rem"], res["despejar"]
+    cer_ult = pd.Timestamp(res["cer_ultimo"])
+    obj = lambda a: a["pago_par"] if contra == "par" else a["pago_curva"]
+    fijos, filas = {}, []
+    cands = []
+    for a in sorted(res["be_aux"], key=lambda z: z["r1"]):
+        if not np.isfinite(obj(a)):
+            continue
+        dias = _dias_por_mes_ipc(cer_ult, a["r1"])
+        ult = max(dias)
+        cubre = dias[ult] / (pd.Period(ult, "M") + 1).days_in_month
+        if anclas == "mes_completo" and cubre < 0.97:
+            continue
+        cands.append((a, dias, ult, cubre))
+    for i, (a, dias, ult, cubre) in enumerate(cands):
+        faltan = [m for m in sorted(dias) if m not in ipc_pub and m not in fijos]
+        if not faltan or (len(faltan) == 1 and cubre < 0.5):
+            continue
+        nuevos = faltan if (cubre >= 0.5 or len(faltan) == 1) else faltan[:-1]
+        if anclas == "todos" and len(nuevos) < min_meses and i < len(cands) - 1:
+            continue  # tramo corto: sus meses se despejan con el bono siguiente
+        pi = despejar(a["vt"], a["r1"], obj(a), fijos)
+        for m in nuevos:
+            fijos[m] = pi
+            filas.append({"mes": m, "inflacion": pi, "fuente": "Breakeven despejado",
+                          "bono": a["ticker"] + (f" / {a['par']}" if contra == "par" else "")})
+    publicados = sorted(ipc_pub)[-meses_publicados:]
+    filas = [{"mes": m, "inflacion": ipc_pub[m], "fuente": "INDEC (publicado)", "bono": ""} for m in publicados] + filas
+    df = pd.DataFrame(filas)
+    if df.empty:
+        return df
+    df = df.set_index("mes").sort_index()
+    df["tea"] = (1 + df["inflacion"]) ** 12 - 1
+    df["rem"] = [rem.get(m, np.nan) for m in df.index]
+    df["dif_rem_pb"] = (df["inflacion"] - df["rem"]) * 1e4
+    return df

@@ -570,7 +570,8 @@ def resumen_llm(contexto, modelo="claude-sonnet-5-5", max_tokens=700):
         pass
     if not clave:
         raise RuntimeError("Falta ANTHROPIC_API_KEY")
-    temas = ["curva en dólares", "inflación esperada", "señal tasa fija vs CER"] + \
+    temas = ["curva en dólares"] + (["riesgo país"] if "riesgo_pais" in contexto else []) + ["inflación esperada", "señal tasa fija vs CER"] + \
+            (["dólar futuro y devaluación esperada"] if "dolar_futuro" in contexto else []) + \
             (["tasas forward en pesos y en dólares"] if "tasas_forward" in contexto else []) + ["riesgos"]
     import anthropic
     cliente = anthropic.Anthropic(api_key=clave)
@@ -604,6 +605,14 @@ def resumen_plantilla(c):
         texto += f"\n\nSeñal: con el sendero del modelo, {n_cer} de {len(sen)} pares favorecen al CER; con el sendero del REM, {n_cer_rem} de {len(sen)}."
     else:
         texto += f"\n\nSeñal: si la inflación sigue el sendero del REM, {n_cer_rem} de {len(sen)} pares tasa fija/CER favorecen al CER."
+    rp = c.get("riesgo_pais")
+    if rp:
+        texto = texto.replace("\n\nInflación esperada:", f" El riesgo país está en {rp['pb']} pb ({rp['cambio_1m_pb']:+d} pb en un mes); "
+                              f"el spread mediano de los Globales contra el Tesoro de EE.UU. da {rp['spread_globales_pb']} pb.\n\nInflación esperada:", 1)
+    fu = c.get("dolar_futuro")
+    if fu:
+        texto += (f"\n\nDólar futuro: con el A3500 en ${fu['a3500']}, el contrato de {fu['contrato']} cotiza ${fu['precio']} "
+                  f"({fu['devaluacion_%']}% de devaluación, {fu['mensual_%']}% mensual).")
     fw = c.get("tasas_forward", {})
     pesos = fw.get("pesos_tasa_fija_TEM_%", {})
     dol = next((v for k, v in fw.items() if k.startswith("dolares")), {})
