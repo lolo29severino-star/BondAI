@@ -223,18 +223,27 @@ PROMPT = ("Sos analista de renta fija en Argentina y escribís el informe semana
           "sin tablas. El último párrafo aclara que no es recomendación de inversión.")
 
 
+def texto_de(msj):
+    """Junta los bloques de texto de la respuesta. Los modelos nuevos pueden devolver primero un bloque de razonamiento
+    ('thinking'), que no tiene .text: por eso no alcanza con msj.content[0].text."""
+    return "\n\n".join(b.text for b in msj.content if getattr(b, "type", "") == "text" and getattr(b, "text", "")).strip()
+
+
 def redactar(ctx, modelo="claude-sonnet-5-5"):
     """Texto del informe: Claude si hay ANTHROPIC_API_KEY; si no (o si falla), la plantilla. Devuelve (texto, origen)."""
-    clave = os.environ.get("ANTHROPIC_API_KEY")
+    clave = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if clave:
         try:
             import anthropic
             msj = anthropic.Anthropic(api_key=clave).messages.create(
-                model=modelo, max_tokens=1100, system=PROMPT,
+                model=modelo, max_tokens=4000, system=PROMPT,
                 messages=[{"role": "user", "content": "Datos de la semana (JSON):\n" + json.dumps(ctx, ensure_ascii=False)}])
-            return msj.content[0].text.strip(), f"redactado por Claude ({modelo})"
+            texto = texto_de(msj)
+            if not texto:
+                raise RuntimeError(f"respuesta sin texto (stop_reason={getattr(msj, 'stop_reason', '?')})")
+            return texto, f"redactado por Claude ({modelo})"
         except Exception as e:
-            return plantilla(ctx), f"plantilla (Claude no respondió: {type(e).__name__})"
+            return plantilla(ctx), f"plantilla (Claude no respondió: {type(e).__name__}: {str(e)[:120]})"
     return plantilla(ctx), "plantilla automática (sin clave de Anthropic)"
 
 

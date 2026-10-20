@@ -560,7 +560,7 @@ PROMPT_SISTEMA = ("Sos analista de renta fija en Argentina. Redactás resúmenes
                   "Si un dato falta, no lo mencionás. Cerrás aclarando que no es recomendación de inversión.")
 
 
-def resumen_llm(contexto, modelo="claude-sonnet-5-5", max_tokens=700):
+def resumen_llm(contexto, modelo="claude-sonnet-5-5", max_tokens=3000):
     """Pide el resumen a Claude. Requiere ANTHROPIC_API_KEY (variable de entorno o Secrets de Colab)."""
     import os
     clave = os.environ.get("ANTHROPIC_API_KEY")
@@ -580,7 +580,10 @@ def resumen_llm(contexto, modelo="claude-sonnet-5-5", max_tokens=700):
         model=modelo, max_tokens=max_tokens, system=PROMPT_SISTEMA,
         messages=[{"role": "user", "content": f"Escribí un resumen ejecutivo de {len(temas)} párrafos cortos ({', '.join(temas)}) "
                                               "con estos resultados:\n" + json.dumps(contexto, ensure_ascii=False)}])
-    return msj.content[0].text
+    texto = "\n\n".join(b.text for b in msj.content if getattr(b, "type", "") == "text" and getattr(b, "text", "")).strip()
+    if not texto:  # los modelos nuevos pueden devolver primero un bloque de razonamiento sin .text
+        raise RuntimeError(f"respuesta sin texto (stop_reason={getattr(msj, 'stop_reason', '?')})")
+    return texto
 
 
 def resumen_plantilla(c):
