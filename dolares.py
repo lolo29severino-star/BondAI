@@ -143,7 +143,7 @@ def techo_banda(fecha):
 
 def dolar_por_bono(paneles, bonos):
     """MEP y cable implícitos en cada bono con el panel de hoy: precio en pesos / precio D y / precio C (VWAP o último)."""
-    px = lambda x: (x[0] or x[1] or x[2]) if x else 0
+    px = lambda x: (x[0] or x[1] or x[2] or x[3]) if x else 0  # antes de la apertura (11 hs) solo hay cierre anterior
     P = paneles["t1"]
     mep_ref = px(P.get("AL30")) / px(P.get("AL30D")) if px(P.get("AL30D")) else np.nan
     filas = []
@@ -156,4 +156,5 @@ def dolar_por_bono(paneles, bonos):
         cab = a / c if c > 0 else np.nan
         filas.append({"bono": t, "mep": mep, "cable": cab, "canje": cab / mep - 1, "vs_mep_al30": mep / mep_ref - 1,
                       "monto_d": (P.get(d_) or [0] * 8)[6] / 1e6, "monto_c": (P.get(c_) or [0] * 8)[6] / 1e6})
-    return pd.DataFrame(filas).set_index("bono")
+    cols = ["bono", "mep", "cable", "canje", "vs_mep_al30", "monto_d", "monto_c"]
+    return pd.DataFrame(filas, columns=cols).set_index("bono")

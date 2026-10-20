@@ -184,6 +184,21 @@ for k, v in cargar_pesos(en_vivo)["fuente"].items():
     st.sidebar.write(f"· pesos/{k}: {v}")
 PAN = cargar_paneles(en_vivo)
 st.sidebar.write(f"· paneles 24 hs: {PAN['fuente']}")
+
+
+def px_pan(sym):
+    """Precio de un símbolo en el panel de 24 hs: VWAP, último, cierre o, antes de la apertura, el cierre anterior."""
+    x = PAN["t1"].get(sym) or []
+    return next((float(v) for v in x[:4] if v and v > 0), np.nan)
+
+
+def dolar_bono(simbolo_usd):
+    """MEP (AL30D) o cable (AL30C) de hoy; si el panel todavía no tiene precios, el último de la serie histórica."""
+    v = px_pan("AL30") / px_pan(simbolo_usd)
+    if np.isfinite(v):
+        return v
+    s_ = DL.series(cargar_dolares(en_vivo))["mep" if simbolo_usd == "AL30D" else "cable"].dropna()
+    return float(s_.iloc[-1]) if len(s_) else np.nan
 FUT, F_FUT = cargar_futuros(en_vivo)
 RIESGO, F_RIESGO = cargar_riesgo(en_vivo)
 ONS, F_ONS = cargar_ons(en_vivo)
@@ -1228,14 +1243,15 @@ with tabFU:
 
 # ── Obligaciones negociables (data912) ──
 with tabN:
-    mep_on = PAN["t1"]["AL30"][0] / PAN["t1"]["AL30D"][0] if PAN["t1"].get("AL30D") and PAN["t1"]["AL30D"][0] else np.nan
+    mep_on = dolar_bono("AL30D")
     TO = X.tabla_ons(ONS, mep_on)
     n1, n2, n3, n4 = st.columns(4)
     n1.metric("ONs con precio", f"{TO['precio_mep'].notna().sum()} en MEP", f"{len(TO)} en total", delta_color="off")
     n2.metric("Volumen en ONs", f"US$ {num_ar(TO['volumen_usd'].sum() / 1e6, 1)} M", "pesos, MEP y cable", delta_color="off")
-    n3.metric("MEP implícito (mediana)", f"$ {num_ar(TO['mep_implicito'].median(), 2)}", f"AL30: $ {num_ar(mep_on, 2)}", delta_color="off",
+    med_mep = TO["mep_implicito"].median()
+    n3.metric("MEP implícito (mediana)", f"$ {num_ar(med_mep, 2)}" if np.isfinite(med_mep) else "–", f"AL30: $ {num_ar(mep_on, 2)}", delta_color="off",
               help="Precio en pesos / precio en dólares de cada ON. Si una ON da un MEP más bajo, conviene usarla para comprar dólares (o al revés).")
-    n4.metric("Canje (mediana)", f"{TO['canje'].median():.1%}", "cable sobre MEP", delta_color="off")
+    n4.metric("Canje (mediana)", f"{TO['canje'].median():.1%}" if TO["canje"].notna().any() else "–", "cable sobre MEP", delta_color="off")
     o1, o2, o3 = st.columns([1.4, 1, 1])
     emis = sorted({e for e in TO["emisor"] if e})
     sel_e = o1.multiselect("Emisor", emis, placeholder="Todos")
@@ -1264,27 +1280,30 @@ with tabN:
     st.caption("data912 publica precios pero no las condiciones de emisión. Cargá las del aviso de resultado o de la ficha técnica de BYMA "
                "(cupón, frecuencia, vencimiento y cómo amortiza) y la app calcula la TIR y la duración al precio de hoy.")
     con_d = TO[TO["precio_mep"].notna()].sort_values("volumen_usd", ascending=False)
-    k1, k2, k3, k4, k5, k6 = st.columns([1.2, .8, .9, 1, .8, .8])
-    on_sel = k1.selectbox("ON", con_d.index.tolist(), format_func=lambda t: f"{t}D · {TO.loc[t, 'emisor']}" if TO.loc[t, "emisor"] else f"{t}D")
-    cup = k2.number_input("Cupón anual %", 0.0, 30.0, 8.0, 0.125) / 100
-    frec = k3.selectbox("Paga", [2, 4, 12, 1], format_func={1: "anual", 2: "semestral", 4: "trimestral", 12: "mensual"}.get)
-    venc_on = k4.date_input("Vencimiento", date(2030, 6, 30), format="DD/MM/YYYY")
-    cuotas_on = k5.number_input("Cuotas de capital que faltan", 1, 40, 1, help="1 = paga todo al vencimiento (bullet).")
-    resid_on = k6.number_input("Residual por 100 VN", 1.0, 100.0, 100.0, 1.0)
-    liq_on = B.liquidacion_24hs(date.today() if en_vivo else D["fecha"])
-    fl_on = X.flujos_on(venc_on, cup, frec, int(cuotas_on), liq_on, resid_on)
-    px_on = float(TO.loc[on_sel, "precio_mep"])
-    y_on, md_on = X.tir_on(px_on, fl_on, liq_on)
-    j1, j2, j3, j4 = st.columns(4)
-    j1.metric("Precio MEP", f"{px_on:.2f}")
-    j2.metric("TIR", f"{y_on:.2%}" if np.isfinite(y_on) else "–")
-    j3.metric("Duración modificada", f"{md_on:.2f}" if np.isfinite(md_on) else "–")
-    j4.metric("Paridad (precio / residual)", f"{px_on / resid_on:.1%}")
-    if fl_on:
-        st.dataframe(pd.DataFrame(fl_on, columns=["Fecha", "Cupón", "Amortización"]).assign(Total=lambda t: t["Cupón"] + t["Amortización"])
-                     .style.format({"Fecha": "{:%d/%m/%Y}", "Cupón": "{:.3f}", "Amortización": "{:.2f}", "Total": "{:.3f}"}), hide_index=True, height=220)
-    st.caption(f"Liquidación {liq_on:%d/%m/%Y} (24 hs). Se toma el precio en dólar MEP como precio sucio (con intereses corridos), igual que los "
-               "soberanos. Las fechas de pago se cuentan hacia atrás desde el vencimiento.")
+    if con_d.empty:
+        st.info("Todavía no hay precios de ONs en dólares (antes de las 11 hs, o data912 no respondió). Probá de nuevo en un rato.")
+    else:
+        k1, k2, k3, k4, k5, k6 = st.columns([1.2, .8, .9, 1, .8, .8])
+        on_sel = k1.selectbox("ON", con_d.index.tolist(), format_func=lambda t: f"{t}D · {TO.loc[t, 'emisor']}" if TO.loc[t, "emisor"] else f"{t}D")
+        cup = k2.number_input("Cupón anual %", 0.0, 30.0, 8.0, 0.125) / 100
+        frec = k3.selectbox("Paga", [2, 4, 12, 1], format_func={1: "anual", 2: "semestral", 4: "trimestral", 12: "mensual"}.get)
+        venc_on = k4.date_input("Vencimiento", date(2030, 6, 30), format="DD/MM/YYYY")
+        cuotas_on = k5.number_input("Cuotas de capital que faltan", 1, 40, 1, help="1 = paga todo al vencimiento (bullet).")
+        resid_on = k6.number_input("Residual por 100 VN", 1.0, 100.0, 100.0, 1.0)
+        liq_on = B.liquidacion_24hs(date.today() if en_vivo else D["fecha"])
+        fl_on = X.flujos_on(venc_on, cup, frec, int(cuotas_on), liq_on, resid_on)
+        px_on = float(TO.loc[on_sel, "precio_mep"])
+        y_on, md_on = X.tir_on(px_on, fl_on, liq_on)
+        j1, j2, j3, j4 = st.columns(4)
+        j1.metric("Precio MEP", f"{px_on:.2f}")
+        j2.metric("TIR", f"{y_on:.2%}" if np.isfinite(y_on) else "–")
+        j3.metric("Duración modificada", f"{md_on:.2f}" if np.isfinite(md_on) else "–")
+        j4.metric("Paridad (precio / residual)", f"{px_on / resid_on:.1%}")
+        if fl_on:
+            st.dataframe(pd.DataFrame(fl_on, columns=["Fecha", "Cupón", "Amortización"]).assign(Total=lambda t: t["Cupón"] + t["Amortización"])
+                         .style.format({"Fecha": "{:%d/%m/%Y}", "Cupón": "{:.3f}", "Amortización": "{:.2f}", "Total": "{:.3f}"}), hide_index=True, height=220)
+        st.caption(f"Liquidación {liq_on:%d/%m/%Y} (24 hs). Se toma el precio en dólar MEP como precio sucio (con intereses corridos), igual que los "
+                   "soberanos. Las fechas de pago se cuentan hacia atrás desde el vencimiento.")
 
 # ── Mi portafolio: cartera propia con riesgo de tasa, VaR y tipo de cartera ──
 GLOSARIO_PF = {
@@ -1313,7 +1332,7 @@ with tabPF:
     st.caption("Cargá tus bonos y nominales (valor nominal, no pesos) y mirá cuánto vale la cartera, cuánto riesgo de tasa tiene, qué pasa en distintos "
                "escenarios, cuánto podría perder en un día malo (VaR) y qué tipo de cartera es. Cada número tiene su explicación al pasar el mouse por el ? "
                "y en el glosario de abajo.")
-    tc_pf = (PAN["t1"]["AL30"][0] / PAN["t1"]["AL30C"][0]) if moneda == "ccl" else (PAN["t1"]["AL30"][0] / PAN["t1"]["AL30D"][0])
+    tc_pf = dolar_bono("AL30C" if moneda == "ccl" else "AL30D")
     UPF = PF.universo(tabla_usd, liq_usd, RP0, tc_pf, moneda)
     orden_g = {g: i for i, g in enumerate(PF.GRUPOS)}
     opciones_pf = sorted(UPF, key=lambda t: (orden_g[UPF[t]["grupo"]], UPF[t]["vence"]))
