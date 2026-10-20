@@ -524,10 +524,11 @@ def _bopreales():
     return out
 
 
-def eventos(desde, hasta):
-    """Calendario como DataFrame: fecha, tipo (lla, lic, liq, cor, ren, amo, ven, fer), moneda, ticker y detalle.
+def eventos(desde, hasta, ons=None):
+    """Calendario como DataFrame: fecha, tipo (lla, lic, liq, cor, ren, amo, ven, fer), moneda ('usd', 'ars', 'on' o ''), ticker y detalle.
     Las fechas de pago que caen en feriado o fin de semana pasan al día hábil siguiente; el corte de cupón (registro) es el día hábil
-    anterior al pago."""
+    anterior al pago. ons: [(ticker, emisor, clase, flujos [(fecha, renta, amortización)], vencimiento, frecuencia supuesta)] de
+    externos.ons_calculables: sus fechas se cuentan hacia atrás desde el vencimiento, así que son estimadas."""
     ev = []
     add = lambda f, tipo, mon, t, txt: ev.append({"fecha": f, "tipo": tipo, "moneda": mon, "ticker": t, "detalle": txt}) if desde <= f <= hasta else None
     C = RESPALDO["calendario"]
@@ -588,6 +589,17 @@ def eventos(desde, hasta):
         add(P.ajustar_pago(date.fromisoformat(d["v"])), "ven", "ars", d["t"], f"vence (dual): {d['cond'].lower()}")
     for t, em, v in P.DL:
         add(P.ajustar_pago(date.fromisoformat(v)), "ven", "ars", t, "vence (dólar linked): paga USD 100 por lámina al A3500 de 3 hábiles antes")
+    # obligaciones negociables (fechas estimadas desde el vencimiento con la frecuencia de la ficha de BYMA)
+    for t, emisor, clase, flujos, venc, supuesta in (ons or []):
+        for f, cup, am in flujos:
+            pago = siguiente_habil(f)
+            if not desde <= pago <= hasta:
+                continue
+            fin = f >= venc
+            tipo = "ven" if fin else "amo" if am > 0 else "ren"
+            txt = (f"vence: US$ {_n(am)} de capital + US$ {_n(cup, 3)} de renta" if fin else
+                   f"amortiza US$ {_n(am)} + renta US$ {_n(cup, 3)}" if am > 0 else f"paga renta de US$ {_n(cup, 3)}")
+            add(pago, tipo, "on", t, f"ON de {emisor} ({clase}): {txt} por 100 VN · fecha estimada" + (" (pagos semestrales supuestos)" if supuesta else ""))
     orden = {k: i for i, k in enumerate(["lic", "lla", "liq", "fer", "ven", "amo", "ren", "cor"])}
     df = pd.DataFrame(ev)
     df["o"] = df["tipo"].map(orden)
@@ -621,15 +633,17 @@ def mes_html(ev, anio, mes, hoy=None):
         for d in semana:
             es = dias_ev.get(d, [])
             grupos = {}
-            for e in es:
-                grupos.setdefault(e["tipo"], []).append(e["ticker"])
+            for e in es:   # las ONs van en su propio renglón, separadas de los soberanos
+                grupos.setdefault((e["tipo"], e["moneda"] == "on"), []).append(e["ticker"])
             clases = " ".join(c for c, ok in [("fuera", d.month != mes), ("hoy", d == hoy), ("fer", d in fer)] if ok)
             chips = ""
-            for tipo in ["lic", "lla", "liq", "fer", "ven", "amo", "ren", "cor"]:
-                if tipo in grupos:
-                    tk = [t for t in grupos[tipo] if t]
-                    txt = TIPOS_EV[tipo] + (" " + " ".join(tk[:3]) + (f" +{len(tk) - 3}" if len(tk) > 3 else "") if tk else "")
-                    chips += f'<span class="ev" style="border-color:{COLOR_EV[tipo]}" title="{TIPOS_EV[tipo]}: {", ".join(tk)}">{txt}</span>'
+            for tipo, on in [(t, o) for t in ["lic", "lla", "liq", "fer", "ven", "amo", "ren", "cor"] for o in (False, True)]:
+                if (tipo, on) in grupos:
+                    tk = [t for t in grupos[(tipo, on)] if t]
+                    nom = TIPOS_EV[tipo] + (" ON" if on else "")
+                    txt = nom + (" " + " ".join(tk[:3]) + (f" +{len(tk) - 3}" if len(tk) > 3 else "") if tk else "")
+                    estilo = f"border-color:{COLOR_EV[tipo]}" + (";border-left-style:dotted" if on else "")
+                    chips += f'<span class="ev" style="{estilo}" title="{nom}: {", ".join(tk)}">{txt}</span>'
             h += f'<td class="{clases}"><span class="n">{d.day}</span>{chips}</td>'
         h += "</tr>"
     return h + "</table>"

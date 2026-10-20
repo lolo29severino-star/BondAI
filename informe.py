@@ -251,14 +251,101 @@ def semana(usar_api, cer, tamar, riesgo, dolares, licitaciones=None, extra=None,
             "riesgo": riesgo, "fuente_precios": ctx["semana"]["precios"]}
 
 
+# ───────────────────────────── lo que se sumó: carry, mercado de dinero, agenda y emisores ─────────────────────────────
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_r = lambda v, d=2: None if v is None or not np.isfinite(v) else round(float(v), d)
+
+
+def contexto_carry(CT, spot, piso_hoy, techo_hoy, plazos=(30, 90, 180, 365, 9999)):
+    """Resumen del carry trade (herramientas.tabla_carry con el dólar oficial) para el LLM y el PDF: unas pocas letras repartidas
+    en la curva (la más cercana a cada plazo) y la que menos pierde si el dólar termina en el techo de la banda."""
+    if CT is None or CT.empty:
+        return None
+    C = CT[CT["dias"] >= 15]
+    if C.empty:
+        return None
+    elegidas = list(dict.fromkeys(C.index[(C["dias"] - d).abs().argsort().iloc[0]] for d in plazos))
+    letras = [{"ticker": t, "tipo": C.loc[t, "tipo"], "vence": f"{C.loc[t, 'vence']:%d/%m/%Y}", "dias": int(C.loc[t, "dias"]),
+               "tirea_%": _r(C.loc[t, "tirea"] * 100), "dolar_equilibrio": _r(C.loc[t, "dolar_be"], 0), "techo_al_vencimiento": _r(C.loc[t, "fx_techo"], 0),
+               "equilibrio_vs_techo_%": _r(C.loc[t, "be_vs_techo"] * 100, 1), "usd_si_dolar_igual_%": _r(C.loc[t, "r_igual"] * 100, 1),
+               "usd_con_dolar_futuro_%": _r(C.loc[t, "r_futuro"] * 100, 1), "usd_si_dolar_en_techo_%": _r(C.loc[t, "r_techo"] * 100, 1)}
+              for t in sorted(elegidas, key=lambda t: C.loc[t, "dias"])]
+    mejor = C["r_techo"].idxmax()
+    return {"dolar_oficial_hoy": _r(spot), "banda_hoy": {"piso": _r(piso_hoy), "techo": _r(techo_hoy)}, "letras": letras,
+            "la_que_menos_pierde_en_el_techo": [mejor, _r(C.loc[mejor, "r_techo"] * 100, 1)],
+            "letras_que_le_ganan_al_techo": [t for t in C.index if C.loc[t, "be_vs_techo"] > 0],
+            "como_leerlo": "usd_*: ganancia en dólares desde hoy hasta el vencimiento (sin anualizar) si el dólar oficial termina igual, en el "
+                           "futuro de A3 o en el techo de la banda; equilibrio_vs_techo_% > 0 significa que la letra le gana al dólar aunque toque el techo"}
+
+
+def contexto_dinero(RD, lecap):
+    """Mercado de dinero (herramientas.resumen_dinero) contra la LECAP más corta."""
+    if RD is None or RD.empty:
+        return None
+    alt = [{"alternativa": a, "tipo": r["tipo"], "tna_%": _r(r["tna"] * 100), "tea_%": _r(r["tea"] * 100), "plazo": r["plazo"],
+            "vs_lecap_pb": _r(r.get("vs_lecap_pb", np.nan), 0)} for a, r in RD.iterrows() if r["tipo"] != "LECAP"]
+    out = {"alternativas": alt}
+    if lecap is not None:
+        out["lecap_mas_corta"] = {"ticker": lecap.name, "dias": int(lecap["dias"]), "tna_%": _r(lecap["tna"] * 100), "tea_%": _r(lecap["tirea"] * 100)}
+    return out
+
+
+def contexto_emisores(ONS_S, emisores):
+    """TIR mediana y spread contra la curva de Globales de las ONs de cada gran emisor (herramientas.spread_ons)."""
+    if ONS_S is None or ONS_S.empty:
+        return None
+    out = {}
+    for e in emisores:
+        x = ONS_S[ONS_S["emisor"] == e].dropna(subset=["tir"])
+        if len(x):
+            out[e] = {"ons": int(len(x)), "tir_mediana_%": _r(x["tir"].median() * 100), "spread_vs_globales_pb": _r(x["spread_pb"].median(), 0),
+                      "la_mas_operada": x["volumen_usd"].idxmax()}
+    return out or None
+
+
+def agenda(desde, hasta, ons=()):
+    """Lo que viene entre 'desde' y 'hasta': licitaciones, feriados, pagos y vencimientos del Tesoro (pesos y dólares) y, aparte,
+    los pagos de las ONs. ons: como en licitaciones.eventos [(ticker, emisor, clase, flujos, vencimiento, frecuencia supuesta)].
+    Las fechas de las ONs se estiman desde el vencimiento con la frecuencia de la ficha de BYMA y pasan al día hábil siguiente."""
+    import licitaciones as L
+    EV = L.eventos(desde, hasta)
+    EV = EV[EV["tipo"].isin(["lla", "lic", "liq", "fer", "ren", "amo", "ven"])]
+    G = L.agrupar(EV)
+    tesoro = [{"fecha": f"{r.fecha:%d/%m/%Y}", "dia": DIAS[r.fecha.weekday()], "que": L.TIPOS_EV[r.tipo], "instrumentos": r.ticker,
+               "detalle": r.detalle} for r in G.itertuples()]
+    pagos = []
+    for t, emisor, clase, flujos, venc, supuesta in ons:
+        for f, cup, am in flujos:
+            pago = L.siguiente_habil(f)
+            if desde <= pago <= hasta:
+                pagos.append({"fecha_": pago, "fecha": f"{pago:%d/%m/%Y}", "dia": DIAS[pago.weekday()], "ticker": t, "emisor": emisor,
+                              "clase": clase or "", "que": "vencimiento" if f >= venc else "amortización y renta" if am > 0 else "renta",
+                              "renta_usd_por_100": round(float(cup), 3), "capital_usd_por_100": round(float(am), 2),
+                              "frecuencia_supuesta": bool(supuesta)})
+    pagos.sort(key=lambda x: (x["fecha_"], x["emisor"], x["ticker"]))
+    for x in pagos:
+        del x["fecha_"]
+    return {"desde": f"{desde:%d/%m/%Y}", "hasta": f"{hasta:%d/%m/%Y}", "tesoro_y_soberanos": tesoro, "pagos_de_ons": pagos,
+            "emisores_que_pagan": sorted({x["emisor"] for x in pagos}),
+            "nota_ons": "fechas de las ONs estimadas desde el vencimiento con la frecuencia de la ficha de BYMA (semestral si no la informa), "
+                        "corridas al día hábil siguiente; montos en US$ por 100 VN"}
+
+
 # ───────────────────────────── texto ─────────────────────────────
 PROMPT = ("Sos analista de renta fija en Argentina y escribís el informe semanal de un equipo de research para estudiantes de economía. "
           "Español rioplatense neutro, frases claras. Usás SOLO los números del JSON (no inventes datos, no agregues noticias ni "
-          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí 7 párrafos cortos separados por una "
+          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí 8 párrafos cortos separados por una "
           "línea en blanco; cada uno empieza con un título corto seguido de dos puntos: 'La semana en una línea', 'Dólar y riesgo país', "
-          "'Bonos en dólares', 'Obligaciones negociables', 'Bonos en pesos', 'Licitación y agenda' y 'Riesgos'. En 'Obligaciones "
-          "negociables' resumí cómo se movieron las ONs más operadas (precio, TIR y su diferencia contra los soberanos) nombrando las empresas. Si un dato falta, omitilo. Sin markdown, sin viñetas, "
-          "sin tablas. El último párrafo aclara que no es recomendación de inversión.")
+          "'Bonos en dólares', 'Obligaciones negociables', 'Bonos en pesos', 'Carry trade y mercado de dinero', 'Licitación y agenda' y "
+          "'Riesgos'. En 'Obligaciones negociables' resumí cómo se movieron las ONs más operadas (precio, TIR y su diferencia contra los "
+          "soberanos) nombrando las empresas, y si está ons_grandes_emisores, la TIR y el spread contra los Globales de los grandes emisores. "
+          "En 'Carry trade y mercado de dinero' usá carry_trade (dólar de equilibrio de las letras contra el techo de la banda y cuánto se "
+          "gana o pierde en dólares si el dólar no se mueve, con el futuro de A3 o en el techo) y mercado_de_dinero (caución, plazo fijo, "
+          "billeteras y fondos money market contra la TEA de la LECAP más corta). En 'Licitación y agenda' contá la licitación de la semana "
+          "y lo que viene en agenda_proximos_dias: la próxima licitación, pagos y vencimientos del Tesoro y de los soberanos, y qué ONs "
+          "pagan, de qué empresa y qué día (nombrá las principales, no todas, y aclará que esas fechas son estimadas). Si hay "
+          "alertas_activas, mencionalas en 'Riesgos'. Si un dato falta, omitilo. Sin markdown, sin viñetas, sin tablas. El último párrafo "
+          "aclara que no es recomendación de inversión.")
 
 
 def texto_de(msj):
@@ -352,6 +439,11 @@ def plantilla(c):
                                                 for k, v in top) + ". "
         b_, m_ = on["mejor_semana"], on["peor_semana"]
         t += f"La mejor semana fue la de {b_[0]} ({_s(b_[1])}%) y la peor, {m_[0]} ({_s(m_[1])}%)."
+        ge = c.get("ons_grandes_emisores")
+        if ge:
+            t += (" Entre los grandes emisores, la TIR mediana es " + "; ".join(
+                f"{e} {_n(v['tir_mediana_%'])}%" + (f" ({_s(v['spread_vs_globales_pb'], 0)} pb contra los Globales)" if v["spread_vs_globales_pb"] is not None else "")
+                for e, v in ge.items()) + ".")
         p.append(t)
     t = "Bonos en pesos: en precio, "
     for g, nom in (("LECAP", "las LECAP"), ("BONCAP", "las BONCAP"), ("CER", "los CER"), ("TAMAR", "los TAMAR"), ("Dual", "los duales"), ("Dólar linked", "los dólar linked")):
@@ -365,6 +457,34 @@ def plantilla(c):
     if I.get("tamar"):
         t += f" La TAMAR quedó en {_n(I['tamar']['fin'])}% TNA."
     p.append(t)
+    ct, md = c.get("carry_trade"), c.get("mercado_de_dinero")
+    if ct or md:
+        t = "Carry trade y mercado de dinero: "
+        if ct and ct["letras"]:
+            x = min(ct["letras"], key=lambda r: abs(r["dias"] - 90))
+            vs = x["equilibrio_vs_techo_%"]
+            t += (f"con el dólar oficial en $ {_n(ct['dolar_oficial_hoy'])} y el techo de la banda en $ {_n(ct['banda_hoy']['techo'])}, "
+                  f"la {x['tipo']} {x['ticker']} ({x['dias']} días) rinde {_n(x['tirea_%'])}% de TIREA y su dólar de equilibrio es "
+                  f"$ {_n(x['dolar_equilibrio'], 0)}, {_n(abs(vs), 1)}% {'por encima' if vs >= 0 else 'por debajo'} del techo que tendrá la banda a su vencimiento. "
+                  f"En dólares, hasta el vencimiento gana {_s(x['usd_si_dolar_igual_%'], 1)}% si el dólar no se mueve")
+            if x["usd_con_dolar_futuro_%"] is not None:
+                t += f", {_s(x['usd_con_dolar_futuro_%'], 1)}% con el dólar futuro de A3"
+            t += f" y {_s(x['usd_si_dolar_en_techo_%'], 1)}% si termina en el techo. "
+            m_ = ct["la_que_menos_pierde_en_el_techo"]
+            t += f"Con el dólar en el techo, la que mejor queda es {m_[0]} ({_s(m_[1], 1)}%). "
+        if md:
+            al = {a["alternativa"]: a for a in md["alternativas"]}
+            partes = []
+            for clave, nom in (("Caución 1 día", "la caución a 1 día"), ("Plazo fijo, bancos grandes (mediana)", "el plazo fijo de los bancos grandes"),
+                               ("Mercado Pago", "Mercado Pago"), ("Fondos money market (mediana de los 10 más grandes)", "los fondos money market (mediana)")):
+                a = next((v for k, v in al.items() if k.startswith(clave)), None)
+                if a and a["tna_%"] is not None:
+                    partes.append(f"{nom} {_n(a['tna_%'])}% TNA ({_n(a['tea_%'])}% TEA)")
+            if partes:
+                t += "En el mercado de dinero, " + ", ".join(partes[:-1]) + (" y " if len(partes) > 1 else "") + partes[-1]
+                lc = md.get("lecap_mas_corta")
+                t += (f", contra una TEA de {_n(lc['tea_%'])}% de la LECAP más corta ({lc['ticker']}, {lc['dias']} días)." if lc else ".")
+        p.append(t.strip())
     lic = c.get("licitacion_de_la_semana")
     if lic:
         ins = ", ".join(f"{x['ticker']}" + (f" a {_n(x['tirea_corte_%'])}%" if x["tirea_corte_%"] is not None else "") for x in lic["instrumentos"])
@@ -375,9 +495,27 @@ def plantilla(c):
         t = "Licitación y agenda: no hubo licitación del Tesoro en la semana."
     if c.get("proxima_licitacion"):
         t += f" La próxima licitación es el {c['proxima_licitacion']}."
+    ag = c.get("agenda_proximos_dias")
+    if ag:
+        pagos_t = [x for x in ag["tesoro_y_soberanos"] if x["que"] in ("Renta", "Amortización", "Vencimiento") and x["instrumentos"]]
+        if pagos_t:
+            t += (f" Entre el {ag['desde'][:5]} y el {ag['hasta'][:5]} hay pagos o vencimientos del Tesoro: "
+                  + "; ".join(f"{x['instrumentos']} el {x['dia']} {x['fecha'][:5]} ({x['que'].lower()})" for x in pagos_t[:6])
+                  + (f" y {len(pagos_t) - 6} más" if len(pagos_t) > 6 else "") + ".")
+        po = ag["pagos_de_ons"]
+        if po:
+            t += (f" En las ONs, {len(po)} pagos de {len(ag['emisores_que_pagan'])} empresas (fechas estimadas): "
+                  + "; ".join(f"{x['emisor']} ({x['ticker']}) el {x['dia']} {x['fecha'][:5]}, " + (
+                      f"vence con US$ {_n(x['capital_usd_por_100'])} de capital" if x["que"] == "vencimiento" else
+                      f"amortiza US$ {_n(x['capital_usd_por_100'])} más renta" if x["capital_usd_por_100"] > 0 else
+                      f"renta de US$ {_n(x['renta_usd_por_100'], 3)}") + " por 100 VN" for x in po[:6])
+                  + (f", y {len(po) - 6} pagos más en la tabla" if len(po) > 6 else "") + ".")
     p.append(t)
-    p.append("Riesgos: los precios de una semana pueden cambiar rápido con el dólar, la inflación o noticias fiscales; las tasas implícitas incluyen "
-             "primas por plazo y por riesgo, así que no son pronósticos. Herramienta académica: no constituye recomendación de inversión.")
+    al_ = c.get("alertas_activas")
+    p.append("Riesgos: " + (("alertas activas: " + "; ".join(al_) + ". ") if al_ else "") +
+             "los precios de una semana pueden cambiar rápido con el dólar, la inflación o noticias fiscales; las tasas implícitas incluyen "
+             "primas por plazo y por riesgo, así que no son pronósticos, y la banda cambiaria puede cambiar. Herramienta académica: no constituye "
+             "recomendación de inversión.")
     return "\n\n".join(p)
 
 
@@ -458,8 +596,9 @@ def _limpio(s):
     return s
 
 
-def pdf(S, texto, origen=""):
-    """Arma el PDF y devuelve sus bytes."""
+def pdf(S, texto, origen="", ctx=None):
+    """Arma el PDF y devuelve sus bytes. ctx: el contexto completo que recibió el LLM (con carry_trade, mercado_de_dinero y
+    agenda_proximos_dias, que arma la app); si falta, se usa S['contexto']."""
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_JUSTIFY
     from reportlab.lib.pagesizes import A4
@@ -565,11 +704,75 @@ def pdf(S, texto, origen=""):
                                ("ALIGN", (2, 0), (-1, -1), "RIGHT")]))
         hist += [KeepTogether([Paragraph(_limpio(f"Licitación del {lic['fecha']}: adjudicó $ {_n(lic['adjudicado_billones'])} billones de "
                                                  f"$ {_n(lic['ofertado_billones'])} ofertados"), h2), t])]
+    ctx = ctx or S.get("contexto", {})
+    celda = ParagraphStyle("cel", parent=est["Normal"], fontSize=7.4, leading=9)
+    estilo_t = lambda f=7.8: TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", f), ("FONT", (0, 1), (-1, -1), "Helvetica", f),
+                                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#141A2E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                                         ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F1EC")]),
+                                         ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)])
+    pct = lambda v, d=1: "" if v is None else f"{_s(v, d)}%"
+    # carry trade con la banda
+    ct = ctx.get("carry_trade")
+    if ct and ct.get("letras"):
+        filas = [["Letra", "Tipo", "Vence", "TIREA", "Dólar de\nequilibrio", "Techo al\nvencimiento", "Dólar\nigual", "Dólar\nfuturo", "Dólar en\nel techo"]]
+        for x in ct["letras"]:
+            filas.append([x["ticker"], x["tipo"], x["vence"], f"{_n(x['tirea_%'])}%", f"$ {_n(x['dolar_equilibrio'], 0)}", f"$ {_n(x['techo_al_vencimiento'], 0)}",
+                          pct(x["usd_si_dolar_igual_%"]), pct(x["usd_con_dolar_futuro_%"]), pct(x["usd_si_dolar_en_techo_%"])])
+        t = Table(filas, colWidths=[1.6 * cm, 1.6 * cm, 1.9 * cm, 1.6 * cm, 2 * cm, 2 * cm, 1.8 * cm, 1.8 * cm, 2.1 * cm], repeatRows=1)
+        t.setStyle(estilo_t()); t.setStyle(TableStyle([("ALIGN", (3, 0), (-1, -1), "RIGHT")]))
+        hist += [KeepTogether([Paragraph("Carry trade con la banda cambiaria", h2),
+                               Paragraph(_limpio(f"Dólar oficial (A3500) hoy: $ {_n(ct['dolar_oficial_hoy'])}; banda: piso $ {_n(ct['banda_hoy']['piso'])} y techo "
+                                                 f"$ {_n(ct['banda_hoy']['techo'])}. Ganancia en dólares desde hoy hasta el vencimiento (sin anualizar) según dónde "
+                                                 "termine el dólar."), chico), Spacer(1, 3), t,
+                               Paragraph(_limpio("Dólar de equilibrio = dólar de hoy x pago final / precio: el dólar al que la letra rinde lo mismo que "
+                                                 "quedarse en dólares. Si está por encima del techo, la letra le gana al dólar aunque toque el techo. Dólar "
+                                                 "futuro: A3 interpolado al vencimiento. Sin comisiones ni impuestos."), chico)])]
+    # mercado de dinero
+    md = ctx.get("mercado_de_dinero")
+    if md and md.get("alternativas"):
+        filas = [["Alternativa", "Tipo", "TNA", "TEA", "vs LECAP\n(pb de TEA)", "Plazo"]]
+        lc = md.get("lecap_mas_corta")
+        if lc:
+            filas.append([Paragraph(_limpio(f"LECAP más corta ({lc['ticker']})"), celda), "LECAP", f"{_n(lc['tna_%'])}%", f"{_n(lc['tea_%'])}%", "referencia",
+                          f"{lc['dias']} días"])
+        for a in sorted(md["alternativas"], key=lambda a: -(a["tea_%"] or 0)):
+            filas.append([Paragraph(_limpio(a["alternativa"]), celda), Paragraph(_limpio(a["tipo"]), celda),
+                          "" if a["tna_%"] is None else f"{_n(a['tna_%'])}%", "" if a["tea_%"] is None else f"{_n(a['tea_%'])}%",
+                          "" if a["vs_lecap_pb"] is None else f"{_s(a['vs_lecap_pb'], 0)}", a["plazo"]])
+        t = Table(filas, colWidths=[5.6 * cm, 3.4 * cm, 1.7 * cm, 1.7 * cm, 2.2 * cm, 2.2 * cm], repeatRows=1)
+        t.setStyle(estilo_t()); t.setStyle(TableStyle([("ALIGN", (2, 0), (-2, -1), "RIGHT")]))
+        hist += [KeepTogether([Paragraph("Mercado de dinero: dónde dejar pesos a corto plazo", h2), t,
+                               Paragraph(_limpio("Todo en TEA para comparar: la caución y las billeteras capitalizan cada día, el plazo fijo cada 30 días y "
+                                                 "la LECAP paga al vencimiento. Billeteras: rendimiento del último día de su fondo money market. Antes de "
+                                                 "impuestos y comisiones."), chico)])]
+    # agenda
+    ag = ctx.get("agenda_proximos_dias")
+    if ag:
+        if ag["tesoro_y_soberanos"]:
+            filas = [["Fecha", "Día", "Qué pasa", "Instrumentos", "Detalle"]]
+            for x in ag["tesoro_y_soberanos"]:
+                filas.append([x["fecha"][:5], x["dia"], x["que"], Paragraph(_limpio(x["instrumentos"]), celda), Paragraph(_limpio(x["detalle"]), celda)])
+            t = Table(filas, colWidths=[1.3 * cm, 1.7 * cm, 2.2 * cm, 2.6 * cm, 9 * cm], repeatRows=1)
+            t.setStyle(estilo_t())
+            hist += [KeepTogether([Paragraph(_limpio(f"Agenda del {ag['desde'][:5]} al {ag['hasta'][:5]}: Tesoro y soberanos"), h2), t])]
+        po = ag.get("pagos_de_ons") or []
+        if po:
+            filas = [["Fecha", "Día", "ON", "Emisor", "Clase", "Qué paga", "Renta", "Capital"]]
+            for x in po:
+                filas.append([x["fecha"][:5], x["dia"], x["ticker"], Paragraph(_limpio(x["emisor"]), celda), Paragraph(_limpio(x["clase"])[:34], celda),
+                              x["que"], f"{_n(x['renta_usd_por_100'], 3)}", f"{_n(x['capital_usd_por_100'])}" if x["capital_usd_por_100"] else ""])
+            t = Table(filas, colWidths=[1.3 * cm, 1.7 * cm, 1.4 * cm, 3.4 * cm, 3.1 * cm, 2.9 * cm, 1.5 * cm, 1.5 * cm], repeatRows=1)
+            t.setStyle(estilo_t()); t.setStyle(TableStyle([("ALIGN", (6, 0), (-1, -1), "RIGHT")]))
+            hist += [Paragraph(_limpio(f"Pagos de ONs del {ag['desde'][:5]} al {ag['hasta'][:5]} ({len(po)} pagos de {len(ag['emisores_que_pagan'])} empresas)"), h2),
+                     t, Paragraph(_limpio("Montos en US$ por 100 VN. Fechas estimadas: se cuentan hacia atrás desde el vencimiento con la frecuencia "
+                                          "de la ficha técnica de BYMA (semestral si no la informa) y pasan al día hábil siguiente; confirmalas en el "
+                                          "aviso de pago de cada emisor. Para cobrar hay que tener la ON al cierre del día hábil anterior (registro)."), chico)]
     hist += [Spacer(1, 10), Paragraph(_limpio(
         "Metodología: precios de cierre de BYMA (24 hs); bonos en dólares en dólar MEP (tickers D). La tasa de cada bono se calcula con el "
         "mismo método de la app: TIR efectiva anual de los flujos para Bonares, Globales y Tesoro USD; TIREA del pago final para LECAP y BONCAP; "
         "TIR real con el CER de 10 hábiles antes para los CER cupón cero; ONs con la TIR de sus flujos según la ficha de BYMA. Variación = último cierre contra el de una semana antes. Fuentes: BYMA "
-        "Open Data, BCRA, ArgentinaDatos (riesgo país), A3 Mercados (futuros) y Secretaría de Finanzas (licitaciones). El texto lo redacta un "
+        "Open Data (precios, caución y fichas de las ONs), BCRA (CER, TAMAR, A3500 y banda cambiaria), ArgentinaDatos (riesgo país, plazo fijo, "
+        "billeteras y fondos money market), A3 Mercados (futuros) y Secretaría de Finanzas (licitaciones y cronograma). El texto lo redacta un "
         "modelo de lenguaje a partir de esos números, sin datos propios. Herramienta académica (Programación para Economistas, UCA); no es "
         "recomendación de inversión."), chico)]
 
