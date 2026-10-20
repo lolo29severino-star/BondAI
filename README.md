@@ -52,7 +52,7 @@ Se abre en http://localhost:8501.
 - La barra lateral dice a qué hora se bajaron los datos y de qué fuente salió cada parte (API o respaldo).
 - Si BYMA o el BCRA no responden, la app usa el respaldo del 09/10/2026 y lo avisa (las ONs, el del 19 y 20/10/2026; las licitaciones, hasta la del 14/10/2026).
 - Licitaciones: cada 3 horas la app revisa la página de noticias de la Secretaría de Finanzas; si hay un «Resultado de la licitación» nuevo lo lee, calcula el premio contra BYMA y lo agrega solo. Del último «Llamado a licitación» saca el menú de la próxima.
-- ONs: emisor, vencimiento y cupón salen de la ficha técnica de BYMA (guardada para las 293 ONs de data912; las nuevas se consultan solas).
+- ONs: emisor, vencimiento y cupón salen de la ficha técnica de BYMA (guardada para las 293 ONs de data912; las nuevas se consultan solas). Las ONs en dólares a tasa fija también se pueden cargar en **Mi portafolio** y ver en **Flujos de fondos**, y el informe semanal resume cómo se movieron las más operadas.
 - Informe semanal: en la última pestaña, **Generar el informe de la semana** compara el último cierre contra el de una semana antes y arma un PDF para descargar. En vivo tarda unos 20 segundos porque baja los cierres de cada bono.
 - Futuros de A3, riesgo país, Tesoro de EE.UU. y ONs se bajan de sus propias APIs públicas; las ONs se renuevan cada 5 minutos.
 

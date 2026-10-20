@@ -351,6 +351,32 @@ def tabla_ons(df, mep_ref=None, fichas=None):
     return t[t[["precio_mep", "precio_cable", "precio_pesos"]].notna().any(axis=1)]
 
 
+def ons_calculables(TO, fichas, liq, moneda="mep"):
+    """ONs en dólares con tasa fija, vencimiento y precio conocidos, listas para el portafolio, los flujos y el informe.
+    Las condiciones salen de la ficha de BYMA; si no informa la frecuencia se suponen pagos semestrales (lo más común) y las
+    cuotas de capital se reparten en las últimas fechas de pago (aproximación: para el cronograma exacto, ver el prospecto).
+    Se descartan las que dan una TIR fuera de −5% a 35% (señal de que amortizan distinto o el precio está desactualizado)."""
+    filas = []
+    for r, x in TO.iterrows():
+        fi = (fichas or {}).get(r) or FICHAS.get(r)
+        if not fi or fi[4] is None or fi[5] == "v" or fi[3] != "USD" or not fi[1]:
+            continue
+        venc = date.fromisoformat(fi[1])
+        cable = moneda == "ccl" and np.isfinite(x.get("precio_cable", np.nan))
+        px = float(x["precio_cable"] if cable else x["precio_mep"])
+        if venc <= liq or not np.isfinite(px) or px <= 0:
+            continue
+        frec, cuotas = int(fi[6] or 2), int(fi[7] or 1)
+        fl = flujos_on(venc, fi[4] / 100, frec, cuotas, liq)
+        y, md = tir_on(px, fl, liq)
+        if not np.isfinite(y) or not -0.05 <= y <= 0.35:
+            continue
+        filas.append({"ticker": r, "emisor": x["emisor"], "clase": fi[8], "vence": venc, "cupon": fi[4] / 100, "frecuencia": frec, "cuotas": cuotas,
+                      "frec_supuesta": fi[6] is None, "precio": px, "simbolo": r + ("C" if cable else "D"), "tir": y, "md": md,
+                      "volumen_usd": float(x.get("volumen_usd") or 0), "flujos": fl})
+    return pd.DataFrame(filas).set_index("ticker") if filas else pd.DataFrame()
+
+
 def flujos_on(vence, cupon, frecuencia=2, cuotas=1, liq=None, residual=100.0):
     """Flujos futuros por 100 VN originales de una ON a tasa fija: cupón anual 'cupon' sobre el residual, pagado 'frecuencia'
     veces por año (fechas hacia atrás desde el vencimiento), y el residual devuelto en 'cuotas' pagos iguales al final.

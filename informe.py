@@ -141,13 +141,35 @@ def tabla_bonos(H, inst, ini, fin, cer):
     return pd.DataFrame(filas).set_index("ticker") if filas else pd.DataFrame()
 
 
-def semana(usar_api, cer, tamar, riesgo, dolares, licitaciones=None, extra=None):
+def tabla_ons(H, ons, ini, fin):
+    """Precio y TIR al inicio y al fin de la semana de las ONs más operadas.
+    ons: [(ticker, emisor, vencimiento ISO, cupón anual, pagos por año, cuotas, símbolo, volumen US$)]."""
+    import externos as X
+    filas = []
+    for t, emisor, venc, cupon, frec, cuotas, sym, vol in ons:
+        s = H.get(sym)
+        if s is None or not len(s) or s.index.max() < pd.Timestamp(fin) - pd.Timedelta(days=3):
+            continue
+        p0, p1 = _valor(s, ini), _valor(s, fin)
+        if not (p0 > 0 and p1 > 0):
+            continue
+        v = date.fromisoformat(venc)
+        tir = lambda px, f: X.tir_on(px, X.flujos_on(v, cupon, frec, cuotas, P.siguiente_habil(f)), P.siguiente_habil(f))[0]
+        y0, y1 = tir(p0, ini), tir(p1, fin)
+        filas.append({"ticker": t, "emisor": emisor, "precio_ini": p0, "precio_fin": p1, "var": p1 / p0 - 1, "tir_ini": y0, "tir_fin": y1,
+                      "var_pb": (y1 - y0) * 1e4 if np.isfinite(y0) and np.isfinite(y1) else np.nan, "volumen_usd": vol})
+    return pd.DataFrame(filas).set_index("ticker") if filas else pd.DataFrame()
+
+
+def semana(usar_api, cer, tamar, riesgo, dolares, licitaciones=None, extra=None, ons=()):
     """Todo lo que entra en el informe: tabla de bonos, indicadores al inicio y al fin, resúmenes por grupo y el contexto
-    JSON para el LLM. dolares: DataFrame de dolares.series(); licitaciones: (subastas, colocaciones) de licitaciones.actualizar."""
+    JSON para el LLM. dolares: DataFrame de dolares.series(); licitaciones: (subastas, colocaciones) de licitaciones.actualizar;
+    ons: las ONs más operadas (ver tabla_ons)."""
     inst = instrumentos()
-    H, fuente = historias(sorted({s for _, s in inst.values()}), usar_api)
+    H, fuente = historias(sorted({s for _, s in inst.values()} | {o[6] for o in ons}), usar_api)
     ini, fin = ventana(H)
     T = tabla_bonos(H, inst, ini, fin, cer)
+    TO = tabla_ons(H, ons, ini, fin)
     en_vivo = sum(v == "BYMA" for v in fuente.values())
     # indicadores
     ind = {}
@@ -209,17 +231,33 @@ def semana(usar_api, cer, tamar, riesgo, dolares, licitaciones=None, extra=None)
             ctx["usd_mas_se_amplio_pb"] = {t: round(float(v)) for t, v in usd["var_pb"].sort_values().tail(3)[::-1].items()}
     if lic:
         ctx["licitacion_de_la_semana"] = lic
+    if len(TO):
+        ctx["obligaciones_negociables"] = {
+            "ons_medidas": int(len(TO)), "var_precio_mediana_%": round(float(TO["var"].median()) * 100, 2),
+            "tir_mediana_ini_%": round(float(TO["tir_ini"].median()) * 100, 2), "tir_mediana_fin_%": round(float(TO["tir_fin"].median()) * 100, 2),
+            "var_tir_mediana_pb": round(float(TO["var_pb"].median())) if TO["var_pb"].notna().any() else None,
+            "mas_operadas": {t: {"emisor": r["emisor"], "precio": round(float(r["precio_fin"]), 2), "var_%": round(float(r["var"]) * 100, 2),
+                                 "tir_%": round(float(r["tir_fin"]) * 100, 2) if np.isfinite(r["tir_fin"]) else None,
+                                 "var_tir_pb": round(float(r["var_pb"])) if np.isfinite(r["var_pb"]) else None}
+                             for t, r in TO.sort_values("volumen_usd", ascending=False).head(8).iterrows()},
+            "mejor_semana": [TO["var"].idxmax(), round(float(TO["var"].max()) * 100, 2)],
+            "peor_semana": [TO["var"].idxmin(), round(float(TO["var"].min()) * 100, 2)]}
+        sob = ctx["por_grupo"]
+        tir_sob = [sob[g]["tasa_mediana_fin_%"] for g in ("Globales", "Bonares") if g in sob and sob[g]["tasa_mediana_fin_%"] is not None]
+        if tir_sob:
+            ctx["obligaciones_negociables"]["spread_vs_soberanos_pb"] = round((float(TO["tir_fin"].median()) * 100 - float(np.median(tir_sob))) * 100)
     ctx.update(extra or {})
-    return {"ini": ini, "fin": fin, "tabla": T, "indicadores": ind, "grupos": grupos, "licitacion": lic, "contexto": ctx, "historias": H,
+    return {"ini": ini, "fin": fin, "tabla": T, "ons": TO, "indicadores": ind, "grupos": grupos, "licitacion": lic, "contexto": ctx, "historias": H,
             "riesgo": riesgo, "fuente_precios": ctx["semana"]["precios"]}
 
 
 # ───────────────────────────── texto ─────────────────────────────
 PROMPT = ("Sos analista de renta fija en Argentina y escribís el informe semanal de un equipo de research para estudiantes de economía. "
           "Español rioplatense neutro, frases claras. Usás SOLO los números del JSON (no inventes datos, no agregues noticias ni "
-          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí 6 párrafos cortos separados por una "
+          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí 7 párrafos cortos separados por una "
           "línea en blanco; cada uno empieza con un título corto seguido de dos puntos: 'La semana en una línea', 'Dólar y riesgo país', "
-          "'Bonos en dólares', 'Bonos en pesos', 'Licitación y agenda' y 'Riesgos'. Si un dato falta, omitilo. Sin markdown, sin viñetas, "
+          "'Bonos en dólares', 'Obligaciones negociables', 'Bonos en pesos', 'Licitación y agenda' y 'Riesgos'. En 'Obligaciones "
+          "negociables' resumí cómo se movieron las ONs más operadas (precio, TIR y su diferencia contra los soberanos) nombrando las empresas. Si un dato falta, omitilo. Sin markdown, sin viñetas, "
           "sin tablas. El último párrafo aclara que no es recomendación de inversión.")
 
 
@@ -299,6 +337,22 @@ def plantilla(c):
         k2, v2 = next(iter(c["usd_mas_se_amplio_pb"].items()))
         t += (f"el que más comprimió fue {k} ({_s(v, 0)} pb) y " + (f"el que más se amplió, {k2} ({_s(v2, 0)} pb)." if v2 > 0 else f"el que menos se movió, {k2} ({_s(v2, 0)} pb)."))
     p.append(t.rstrip("; ") + ("" if t.endswith(".") else "."))
+    on = c.get("obligaciones_negociables")
+    if on:
+        t = (f"Obligaciones negociables: entre las {on['ons_medidas']} ONs en dólares más operadas, el precio mediano "
+             f"{'subió' if on['var_precio_mediana_%'] >= 0 else 'bajó'} {_n(abs(on['var_precio_mediana_%']))}% y la TIR mediana pasó de "
+             f"{_n(on['tir_mediana_ini_%'])}% a {_n(on['tir_mediana_fin_%'])}%")
+        if on.get("spread_vs_soberanos_pb") is not None:
+            d_ = on["spread_vs_soberanos_pb"]
+            t += f" ({_n(abs(d_), 0)} pb {'por debajo' if d_ < 0 else 'por encima'} de la TIR mediana de Bonares y Globales)"
+        t += ". "
+        top = list(on["mas_operadas"].items())[:4]
+        if top:
+            t += "Las más operadas: " + "; ".join(f"{k} ({v['emisor']}) {_s(v['var_%'])}%" + (f", TIR {_n(v['tir_%'])}%" if v["tir_%"] is not None else "")
+                                                for k, v in top) + ". "
+        b_, m_ = on["mejor_semana"], on["peor_semana"]
+        t += f"La mejor semana fue la de {b_[0]} ({_s(b_[1])}%) y la peor, {m_[0]} ({_s(m_[1])}%)."
+        p.append(t)
     t = "Bonos en pesos: en precio, "
     for g, nom in (("LECAP", "las LECAP"), ("BONCAP", "las BONCAP"), ("CER", "los CER"), ("TAMAR", "los TAMAR"), ("Dual", "los duales"), ("Dólar linked", "los dólar linked")):
         if g in G:
@@ -447,6 +501,20 @@ def pdf(S, texto, origen=""):
         if k in G:
             img = Image(G[k]); w = 16.5 * cm; img.drawHeight = w * img.imageHeight / img.imageWidth; img.drawWidth = w
             hist.append(KeepTogether([Paragraph(titulos[k], h2), img]))
+    # obligaciones negociables
+    TO = S.get("ons")
+    if TO is not None and len(TO):
+        filas = [["ON", "Emisor", f"Precio {ini:%d/%m}", f"Precio {fin:%d/%m}", "Var.", f"TIR {fin:%d/%m}", "Cambio TIR"]]
+        for t_, r in TO.sort_values("volumen_usd", ascending=False).head(12).iterrows():
+            filas.append([t_, _limpio(r["emisor"])[:24], _n(r["precio_ini"]), _n(r["precio_fin"]), f"{_s(r['var'] * 100)}%",
+                          f"{_n(r['tir_fin'] * 100)}%" if np.isfinite(r["tir_fin"]) else "", f"{_s(r['var_pb'], 0)} pb" if np.isfinite(r["var_pb"]) else ""])
+        t = Table(filas, colWidths=[1.6 * cm, 4.2 * cm, 2 * cm, 2 * cm, 1.8 * cm, 2 * cm, 2.2 * cm])
+        t.setStyle(TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8.2), ("FONT", (0, 1), (-1, -1), "Helvetica", 8.2),
+                               ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#141A2E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                               ("ALIGN", (2, 0), (-1, -1), "RIGHT"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F1EC")])]))
+        hist += [KeepTogether([Paragraph("Obligaciones negociables más operadas (dólar MEP)", h2), t,
+                               Paragraph(_limpio("TIR con las condiciones de la ficha técnica de BYMA (pagos semestrales si la ficha no informa la "
+                                                 "frecuencia). Ordenadas por volumen operado."), chico)])]
     # tabla por grupo
     if S["grupos"]:
         filas = [["Grupo", "Bonos", "Precio (mediana)", f"Tasa {ini:%d/%m}", f"Tasa {fin:%d/%m}", "Cambio de tasa"]]
@@ -474,7 +542,7 @@ def pdf(S, texto, origen=""):
     hist += [Spacer(1, 10), Paragraph(_limpio(
         "Metodología: precios de cierre de BYMA (24 hs); bonos en dólares en dólar MEP (tickers D). La tasa de cada bono se calcula con el "
         "mismo método de la app: TIR efectiva anual de los flujos para Bonares, Globales y Tesoro USD; TIREA del pago final para LECAP y BONCAP; "
-        "TIR real con el CER de 10 hábiles antes para los CER cupón cero. Variación = último cierre contra el de una semana antes. Fuentes: BYMA "
+        "TIR real con el CER de 10 hábiles antes para los CER cupón cero; ONs con la TIR de sus flujos según la ficha de BYMA. Variación = último cierre contra el de una semana antes. Fuentes: BYMA "
         "Open Data, BCRA, ArgentinaDatos (riesgo país), A3 Mercados (futuros) y Secretaría de Finanzas (licitaciones). El texto lo redacta un "
         "modelo de lenguaje a partir de esos números, sin datos propios. Herramienta académica (Programación para Economistas, UCA); no es "
         "recomendación de inversión."), chico)]

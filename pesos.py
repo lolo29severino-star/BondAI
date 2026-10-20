@@ -466,7 +466,14 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
         d_fut = (r1 - cer_ult).days
         be, rem_m, nota = np.nan, np.nan, ""
         if d_fut < 15:
+            # El CER que se usa para el pago (10 hábiles antes del vencimiento) ya está publicado: el bono paga una cantidad de pesos
+            # conocida y no queda inflación por despejar. Se compara como tasa fija contra la letra del mismo día.
             nota = "CER ya publicado"
+            if cero_cupon:
+                tirea_c = ((vt / cref * cp) / r["precio"]) ** (365 / hz) - 1
+                par = par_de.get(v)
+                r.update(tirea_conocida=tirea_c, par=par["ticker"] if par is not None else None,
+                         vs_par_pb=(tirea_c - par["tirea"]) * 1e4 if par is not None else np.nan)
         elif hz > max_cero:
             nota = "vence después de la LECAP/BONCAP más larga"
         elif not cero_cupon:
