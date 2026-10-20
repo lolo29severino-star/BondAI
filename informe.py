@@ -418,12 +418,25 @@ def graficos(S):
         f_ = T[T["grupo"].isin(["LECAP", "BONCAP"])].dropna(subset=["tasa_fin", "md"])
         f_ = f_[f_["md"] * (1 + f_["tasa_fin"]) * 365 >= 15]                     # sin las que vencen en días: su tasa es puro ruido
         if len(f_) >= 3:
-            f_ = f_.sort_values("md")
-            fig, ax = plt.subplots(figsize=(7.2, 3.0))
-            ax.plot(f_["md"] * (1 + f_["tasa_fin"]) * 365, f_["tasa_ini"] * 100, color=GRIS, marker="o", ms=3, lw=1, ls="--", label=f"{ini:%d/%m}")
-            ax.plot(f_["md"] * (1 + f_["tasa_fin"]) * 365, f_["tasa_fin"] * 100, color=AZUL, marker="o", ms=4, lw=1.5, label=f"{fin:%d/%m}")
-            ax.set_xlabel("Días al vencimiento"); ax.set_ylabel("TIREA %"); ax.grid(alpha=.25); ax.legend(fontsize=7)
+            f_ = f_.sort_values("md").assign(dias=lambda z: z["md"] * (1 + z["tasa_fin"]) * 365)
+            fig, ax = plt.subplots(figsize=(7.2, 3.6))
+            ax.plot(f_["dias"], f_["tasa_ini"] * 100, color=GRIS, lw=1, ls="--", marker="o", ms=3, mfc="white", label=f"Curva del {ini:%d/%m}")
+            ax.plot(f_["dias"], f_["tasa_fin"] * 100, color=AZUL, lw=1.4, alpha=.6, label=f"Curva del {fin:%d/%m}")
+            for g, mk, col in (("LECAP", "o", AZUL), ("BONCAP", "s", VIOLETA)):
+                z = f_[f_["grupo"] == g]
+                if len(z):
+                    ax.scatter(z["dias"], z["tasa_fin"] * 100, marker=mk, s=34, color=col, zorder=3,
+                               label="LECAP (letras, hasta 1 año)" if g == "LECAP" else "BONCAP (bonos, más de 1 año)")
+            for i, (t, r) in enumerate(f_.iterrows()):          # etiqueta de cada instrumento, alternando arriba y abajo para que no se pisen
+                arriba = r["tasa_fin"] >= r["tasa_ini"] if i % 2 == 0 else r["tasa_fin"] < r["tasa_ini"]
+                ax.annotate(f"{t}\n{r['tasa_fin'] * 100:.1f}%".replace(".", ","), (r["dias"], r["tasa_fin"] * 100),
+                            xytext=(0, 9 if arriba else -18), textcoords="offset points", ha="center", fontsize=6.3, color="#141A2E",
+                            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": .85})
+            lo, hi = np.nanmin(f_[["tasa_ini", "tasa_fin"]].values) * 100, np.nanmax(f_[["tasa_ini", "tasa_fin"]].values) * 100
+            ax.set_ylim(lo - 1.2, hi + 1.2)
+            ax.set_xlabel("Días al vencimiento"); ax.set_ylabel("TIREA %"); ax.grid(alpha=.25); ax.legend(fontsize=6.5, loc="lower right")
             out["tasa_fija"] = _png(fig)
+            out["tasa_fija_tabla"] = f_
     r = S.get("riesgo")
     if r is not None and len(r):
         z = r[r.index >= pd.Timestamp(fin) - pd.Timedelta(days=95)]
@@ -500,7 +513,20 @@ def pdf(S, texto, origen=""):
     for k in ("riesgo", "curva_usd", "tasa_fija", "movimientos"):
         if k in G:
             img = Image(G[k]); w = 16.5 * cm; img.drawHeight = w * img.imageHeight / img.imageWidth; img.drawWidth = w
-            hist.append(KeepTogether([Paragraph(titulos[k], h2), img]))
+            bloque = [Paragraph(titulos[k], h2), img]
+            if k == "tasa_fija" and "tasa_fija_tabla" in G:
+                filas = [["Instrumento", "Tipo", "Vence en", f"Precio {fin:%d/%m}", f"TIREA {ini:%d/%m}", f"TIREA {fin:%d/%m}", "Cambio"]]
+                for t_, r in G["tasa_fija_tabla"].iterrows():
+                    filas.append([t_, "Letra (LECAP)" if r["grupo"] == "LECAP" else "Bono (BONCAP)", f"{r['dias']:.0f} días", _n(r["precio_fin"]),
+                                  f"{_n(r['tasa_ini'] * 100)}%" if np.isfinite(r["tasa_ini"]) else "", f"{_n(r['tasa_fin'] * 100)}%",
+                                  f"{_s(r['var_pb'], 0)} pb" if np.isfinite(r["var_pb"]) else ""])
+                tt = Table(filas, colWidths=[2.2 * cm, 2.8 * cm, 2.1 * cm, 2.3 * cm, 2.3 * cm, 2.3 * cm, 2 * cm])
+                tt.setStyle(TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8), ("FONT", (0, 1), (-1, -1), "Helvetica", 8),
+                                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#141A2E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                                        ("ALIGN", (2, 0), (-1, -1), "RIGHT"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F1EC")])]))
+                bloque += [Spacer(1, 4), tt, Paragraph(_limpio("TIREA = (pago final / precio)^(365 / días) - 1, con el pago final de cada instrumento: "
+                                                               "VNO x (1 + TEM de emisión)^(meses 30/360). Se omiten las que vencen en menos de 15 días."), chico)]
+            hist.append(KeepTogether(bloque))
     # obligaciones negociables
     TO = S.get("ons")
     if TO is not None and len(TO):
