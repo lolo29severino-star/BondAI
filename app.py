@@ -1,5 +1,5 @@
 """
-BondAI · aplicación en Streamlit con seis pestañas: Curva en dólares, ONs, Tesoro en pesos, Mi portafolio, Flujos de fondos e
+Bond Analytics · aplicación en Streamlit con seis pestañas: Curva en dólares, ONs, Tesoro en pesos, Mi portafolio, Flujos de fondos e
 Informe semanal con IA.
 Ejecutar:  pip install -r requirements.txt   →   streamlit run app.py
 Publicada en internet: ver README.md (GitHub + Streamlit Community Cloud).
@@ -27,7 +27,7 @@ import mercado as M
 import pesos as P
 import portafolio as PF
 
-st.set_page_config(page_title="BondAI · Renta fija con IA", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Bond Analytics · Renta fija con IA", page_icon="📈", layout="wide")
 
 
 def ver_grafico(fig, destino=None):
@@ -71,11 +71,23 @@ def cargar_dolares(en_vivo):
 
 # Bonos en pesos: el cálculo tarda unos 15 segundos, así que se guarda para cada combinación de supuestos.
 # cache_resource (y no cache_data) porque el resultado incluye funciones (las curvas ajustadas), que no se pueden copiar.
+def dolar_futuro(en_vivo):
+    """A3500 que esperan los futuros de dólar de A3 para cada fecha (lo usan los dólar linked y el TMVE8). None si no hay futuros."""
+    try:
+        fut, _ = cargar_futuros(en_vivo)
+        tc = cargar_pesos(en_vivo)["a3500"].sort_index(); f0 = fut["fecha"].iloc[0]
+        antes = tc[tc.index <= pd.Timestamp(f0)]
+        spot = float(antes.iloc[-1]) if len(antes) else float(tc.iloc[-1])
+        return P.dolar_esperado_futuros(X.devaluacion_futuros(fut, spot, f0), spot, f0)
+    except Exception:
+        return None
+
+
 @st.cache_resource(ttl=900, show_spinner="Calculando los 55 bonos en pesos…")
 def calcular_pesos(en_vivo, plazo, precio, tamar, infl, dev, curva_be="auto"):
     d = cargar(en_vivo)
     return P.calcular(cargar_pesos(en_vivo), plazo, precio, tamar, infl, ipc_publicado=d["macro"]["ipc"].dropna().to_dict(),
-                      rem_mensual=d["rem_mensual"]["mediana"].dropna().to_dict(), dev=dev, curva_be=curva_be)
+                      rem_mensual=d["rem_mensual"]["mediana"].dropna().to_dict(), dev=dev, curva_be=curva_be, dolar_fut=dolar_futuro(en_vivo))
 
 
 
@@ -220,18 +232,25 @@ GUIA = {
               "terminos": [
         ("LECAP, BONCAP y BONTE", "letras y bonos a tasa fija: hoy ya sabés cuántos pesos vas a cobrar al vencimiento."),
         ("CER", "bonos cuyo capital se ajusta por inflación (el CER sigue al IPC con un pequeño atraso). Te protegen si la inflación sube."),
-        ("TAMAR", "pagan una tasa variable: la que pagan los bancos grandes por depósitos grandes, más un margen."),
-        ("Duales", "pagan lo que resulte mayor entre dos opciones (por ejemplo, tasa fija o TAMAR)."),
-        ("Dólar linked", "su capital está atado al dólar oficial (A3500): sirven para cubrirse de una devaluación."),
+        ("TAMAR", "la tasa que pagan los bancos privados por los plazos fijos grandes (más de $1.000 millones, a 30-35 días); la publica el BCRA "
+                  "todos los días. Los bonos TAMAR no tienen una tasa fija: pagan la TAMAR promedio de toda su vida más un margen, así que rinden "
+                  "lo que termine pagando la TAMAR."),
+        ("Duales", "al vencimiento pagan lo que resulte mayor entre dos cuentas («patas»): por ejemplo, tasa fija o TAMAR, inflación o TAMAR, "
+                   "dólar o TAMAR. Te aseguran un piso y te dejan ganar si sube la otra variable."),
+        ("Dólar linked", "se compran y se cobran en pesos, pero lo que devuelven está atado al dólar oficial (A3500): al vencimiento pagan, en pesos, "
+                         "US$ 100 por cada 100 nominales. Sirven para cubrirse de una suba del dólar oficial."),
         ("TEM, TNA y TIREA", "tres maneras de decir la misma tasa: TEM es la tasa por mes; TNA, la anual sin reinvertir (aproximadamente TEM × 12); TIREA, la "
                              "anual reinvirtiendo los intereses, la mejor para comparar."),
         ("TIR real", "cuánto rinde un bono CER por encima de la inflación."),
         ("Inflación breakeven (BE)", "la inflación con la que un CER y una tasa fija del mismo plazo pagan lo mismo. Si creés que va a haber más inflación que "
                                      "esa, conviene el CER; si menos, la tasa fija."),
         ("TAMAR de equilibrio (BE)", "la TAMAR promedio con la que un bono TAMAR rinde igual que la tasa fija. Si esperás una TAMAR más alta, conviene el TAMAR."),
-        ("Dólar de equilibrio y devaluación implícita", "cuánto tendría que subir el dólar oficial para que un dólar linked rinda igual que la tasa fija."),
+        ("Dólar esperado (futuros de A3)", "el dólar oficial que el mercado ya pacta hoy para cada fecha en los contratos de dólar futuro de A3 "
+                                           "Mercados. Con él se estima cuánto van a rendir en pesos los dólar linked."),
+        ("TIR en dólares", "en un dólar linked, lo que ganás por encima de la suba del dólar oficial, por haberlo comprado debajo de US$ 100."),
         ("Plazo CI o 24 hs y precio VWAP", "si la operación se paga hoy (contado inmediato) o mañana, y qué precio usar: VWAP es el promedio del día."),
-        ("Supuestos de arriba", "la TAMAR, la inflación y la devaluación futuras que usa la app para proyectar. Podés cambiarlos y todo se recalcula."),
+        ("Supuestos de arriba", "la TAMAR, la inflación y la devaluación futuras que usa la app para proyectar. Podés cambiarlos y todo se recalcula. "
+                                "Si dejás vacía la devaluación, se usa el dólar de los futuros de A3."),
     ]},
     "pf": {"intro": "**Tu cartera de bonos.** Cargás qué bonos tenés y cuántos (o subís un archivo) y la app te dice cuánto vale, cuánto riesgo tiene si "
                     "se mueven las tasas, cuánto podrías perder en un día malo y cómo está armada. Los números de abajo traen su explicación en el «?»."},
@@ -272,13 +291,13 @@ def guia(clave, terminos=None):
         st.info(g["intro"].replace("$", "\\$"))
     lista = terminos if terminos is not None else g.get("terminos", [])
     if lista:
-        with st.expander(g.get("titulo", "¿Qué significa cada cosa? Explicado sin tecnicismos")):
+        with st.expander(g.get("titulo", "¿Qué significa cada cosa?")):
             st.markdown("\n".join(f"- **{t}:** {d}" for t, d in lista).replace("$", "\\$"))
 
 
 # ── barra lateral ──
-st.sidebar.title("BondAI")
-st.sidebar.caption("Terminal de renta fija argentina con IA · Programación para Economistas")
+st.sidebar.title("Bond Analytics")
+st.sidebar.caption("Terminal de renta fija argentina con IA")
 en_vivo = st.sidebar.toggle("Datos en vivo (APIs de BYMA y BCRA)", value=True,
                             help="Si una API no responde, se usa el respaldo del 09/10/2026 para esa parte.")
 moneda = st.sidebar.radio("Valuar los bonos en dólares en", ["mep", "ccl"], horizontal=True,
@@ -333,7 +352,7 @@ def dolar_bono(simbolo_usd):
         return v
     s_ = DL.series(cargar_dolares(en_vivo))["mep" if simbolo_usd == "AL30D" else "cable"].dropna()
     return float(s_.iloc[-1]) if len(s_) else np.nan
-st.title("BondAI · Renta fija argentina con IA")
+st.title("Bond Analytics · Renta fija argentina con IA")
 tabla_usd, liq_usd = calcular(en_vivo, moneda)
 FUT, F_FUT = cargar_futuros(en_vivo)
 RIESGO, F_RIESGO = cargar_riesgo(en_vivo)
@@ -343,7 +362,7 @@ FICH = cargar_fichas_ons(en_vivo, tuple(sorted(set(ONS["raiz"])))) if len(ONS) e
 TO = X.tabla_ons(ONS, mep_on, FICH) if len(ONS) else pd.DataFrame(columns=["emisor", "precio_mep", "precio_cable", "volumen_usd"])
 ON_OK = X.ons_calculables(TO, FICH, liq_usd, moneda)   # ONs en dólares con tasa fija: van al portafolio, a los flujos y al informe
 ONS_EV = tuple((t, r["emisor"], r["clase"], tuple(r["flujos"]), r["vence"], bool(r["frec_supuesta"])) for t, r in ON_OK.iterrows()) if len(ON_OK) else ()
-for k, v in [("futuros", F_FUT), ("riesgo país", F_RIESGO), ("ONs", F_ONS)]:
+for k, v in [("futuros de dólar (A3)", F_FUT), ("riesgo país", F_RIESGO), ("ONs", F_ONS)]:
     st.sidebar.write(f"· {k}: {v}")
 st.sidebar.caption(f"Fecha de análisis: {D['fecha']:%d/%m/%Y} · datos bajados a las {D['bajado']:%H:%M} (hora argentina)")
 st.sidebar.caption("Herramienta académica. No es recomendación de inversión.")
@@ -509,6 +528,31 @@ def grafico_be(df, max_cero):
     return fig
 
 
+def grafico_dl(df, curva):
+    """Cuánto rendiría en pesos cada dólar linked si el dólar oficial sigue a los futuros, contra la curva de tasa fija.
+    Verde: rinde más que la tasa fija; rojo: menos. Hueco: el dólar sale de extrapolar los futuros. Claro: poco operado."""
+    from matplotlib.lines import Line2D
+    d = df[(df["dias"] >= 30) & np.isfinite(df["tirea_esperada"].astype(float))]
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    if d.empty:
+        ax.text(.5, .5, "Sin dólar linked con más de 30 días", ha="center", transform=ax.transAxes); return fig
+    for t, r in d.iterrows():
+        col = VERDE if r["vs_fija_pb"] > 0 else ROJO
+        poco = r["vol"] < 20
+        ax.scatter(r["x"], r["tirea_esperada"] * 100, s=55, zorder=3, alpha=.45 if poco else 1,
+                   facecolors="none" if r["extrapolado"] else col, edgecolors=col, linewidths=1.6)
+        ax.annotate(t + (" *" if r["extrapolado"] else "") + (" °" if poco else ""), (r["x"], r["tirea_esperada"] * 100),
+                    xytext=(5, 3), textcoords="offset points", fontsize=7)
+    g = np.linspace(max(0.05, d["x"].min() * 0.85), d["x"].max() * 1.05, 100)
+    ax.plot(g, [curva(x) * 100 for x in g], color=AZUL, lw=1.6, alpha=.75)
+    ax.set_xlabel("Años al vencimiento"); ax.set_ylabel("Rinde en pesos (TIREA esperada %)", fontsize=8); ax.grid(alpha=.25)
+    ax.legend(handles=[Line2D([], [], marker="o", ls="", color=VERDE, label="Rinde más que la tasa fija"),
+                       Line2D([], [], marker="o", ls="", color=ROJO, label="Rinde menos que la tasa fija"),
+                       Line2D([], [], color=AZUL, lw=1.6, label="Tasa fija al mismo plazo (LECAP, BONCAP y BONTE)")], fontsize=8, loc="best")
+    fig.tight_layout()
+    return fig
+
+
 def grafico_margen_tamar(tam, dual, tamar_sup):
     """Margen sobre la TAMAR supuesta contra el plazo, con los duales (*) y una curva de mejor ajuste."""
     fig, ax = plt.subplots(figsize=(10, 3.6))
@@ -667,8 +711,8 @@ with tabP:
                                 help="Arranca en el promedio de las últimas 5 ruedas. Se usa en TAMAR y Duales.")
     infl_sup = q4.number_input("Inflación mensual después del REM (%)", min_value=0.0, value=round(float(rem_med.iloc[-1]), 2), step=0.05,
                                help="Sendero del CER: IPC publicado, después medianas del REM y después este valor.") / 100
-    dev_in = q5.number_input("Devaluación mensual esperada (%)", value=None, step=0.05, placeholder="implícita en la curva",
-                             help="Para dólar linked y TMVE8. Vacío = la devaluación implícita en la curva dólar linked.")
+    dev_in = q5.number_input("Devaluación mensual esperada (%)", value=None, step=0.05, placeholder="la de los futuros de A3",
+                             help="Para dólar linked y TMVE8. Vacío = el dólar que esperan los futuros de A3 para cada fecha.")
     dev_sup = None if dev_in is None else dev_in / 100
     IPC_PUB, REM_MED = D["macro"]["ipc"].dropna().to_dict(), rem_med.to_dict()
     RP = calcular_pesos(en_vivo, plazo_p, precio_p, tamar_sup, infl_sup, dev_sup)
@@ -689,10 +733,12 @@ with tabP:
               help="La tasa que pagan los bancos grandes por depósitos grandes (promedio de los últimos 5 días). La usan los bonos TAMAR y duales.")
     m5.metric("Dólar A3500", f"${RP['tc_hoy']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), f"{RP['tc_fecha']:%d/%m}", delta_color="off",
               help="El dólar oficial mayorista que publica el BCRA. Lo usan los bonos dólar linked.")
-    dl_ = RP["dl"]
-    dev6 = np.interp(180, dl_.loc[dl_["dias"] >= 15, "dias"], dl_.loc[dl_["dias"] >= 15, "deval_mensual"]) if len(dl_) else np.nan
-    m6.metric("Devaluación implícita", f"{dev6:.2%}", "mensual a 6 meses", delta_color="off",
-              help="Cuánto por mes tendría que subir el dólar oficial para que un bono dólar linked a 6 meses rinda lo mismo que uno a tasa fija.")
+    FD_ = dolar_futuro(en_vivo)
+    if FD_ is not None:
+        d6_ = FD_(RP["tc_fecha"] + timedelta(days=182))
+        m6.metric("Dólar futuro a 6 meses", f"${num_es(d6_)}", f"{d6_ / RP['tc_hoy'] - 1:+.1%} vs hoy", delta_color="off",
+                  help="El dólar oficial que el mercado de futuros de A3 espera para dentro de seis meses. Con esto se calcula cuánto rinden "
+                       "en pesos los dólar linked.")
 
     alias = [f"{t}→{r['precio_de']}" for k, _, _ in P.TIPOS if len(RP[k]) for t, r in RP[k].iterrows() if r["precio_de"] != t]
     if alias:
@@ -705,25 +751,80 @@ with tabP:
         "boncap": "BONCAP: cupón cero capitalizable, igual que las LECAP. BONTE (TO26, TY30P): tasa fija con cupones semestrales, valuados por flujos.",
         "cer": "Valor técnico = 100 × CER de 10 hábiles antes de la liquidación / CER base (10 hábiles antes de la emisión). Inflación BE: se toma tal cual el CER que el BCRA ya publicó y se busca la inflación mensual pareja de los meses todavía no publicados que hace que el bono pague lo mismo que la curva de tasa fija (ajustada a LECAP y BONCAP, mejor ajuste) a su plazo (n/a: el CER hasta el vencimiento ya está publicado; —: vence después de la letra a tasa fija más larga). REM: promedio mensual del sendero del REM para esos mismos meses. TNA 30/365 = ((1 + TIR)^(30/365) − 1) × 365/30; la nominal usa el sendero IPC publicado → REM → supuesto. DICP, DIP0, PARP, PAP0 y CUAP son los bonos del canje 2005 (base CER 31/12/2003).",
         "tamar": "Margen s/ TAMAR: TNA equivalente al rendimiento del bono menos la TAMAR supuesta. Pagan al vencimiento 100 × (1 + TAMAR TEM)^meses, con TAMAR TEM = [(1 + TAMAR × 32/365)^(365/32)]^(1/12) − 1 y la TAMAR promediada en toda la vida del título (desde 10 hábiles antes de la emisión hasta 10 antes del vencimiento), más el margen de la licitación: TMF27 6,50%, TML27 5,40%, TMG27 6,00%, TMF28 6,50% y TMG28 6,90% (comunicados de la Secretaría de Finanzas; TMG27, ficha técnica).",
-        "dual": "TTD26: máximo entre TEM fija 2,14% y TAMAR. TXM*: máximo entre capital ajustado por CER (proyectado con IPC, REM y la inflación elegida) y TAMAR + 3%. TMVE8: máximo entre USD 100 al A3500 (con la devaluación elegida o la implícita) y el tipo de cambio inicial ($1.499,84) capitalizado a TAMAR. El piso es lo que asegura la otra pata.",
-        "dl": "Pagan USD 100 por lámina en pesos, al A3500 de 3 hábiles antes del vencimiento. Dólar breakeven = precio / 100 × (1 + TIREA de la curva de tasa fija)^(días/365): si el A3500 termina por encima conviene el dólar linked; por debajo, la tasa fija.",
+        "dual": "TTD26: máximo entre TEM fija 2,14% y TAMAR. TXM*: máximo entre capital ajustado por CER (proyectado con IPC, REM y la inflación elegida) y TAMAR + 3%. TMVE8: máximo entre USD 100 al A3500 (con el dólar de los futuros de A3 o la devaluación elegida) y el tipo de cambio inicial ($1.499,84) capitalizado a TAMAR. El piso es lo que asegura la otra pata.",
+        "dl": "Pagan USD 100 por lámina en pesos, al A3500 de 3 hábiles antes del vencimiento. TIR en dólares = (100 × A3500 de hoy / precio)^(365/días) − 1. "
+              "Rinde en pesos (TIREA esperada) = (100 × dólar esperado / precio)^(365/días) − 1, con el dólar esperado de los futuros de A3 (tasa pareja entre "
+              "contratos; después del último, la devaluación mensual de ese contrato) o con la devaluación elegida arriba. Dólar que lo empata = precio / 100 × "
+              "(1 + TIREA de la curva de tasa fija)^(días/365).",
     }
     EN_POCAS = {
         "lecap": "letras a tasa fija: hoy ya sabés cuántos pesos cobrás al vencimiento. Mirá la TEM (cuánto ganás por mes) y la TIREA (por año).",
         "boncap": "como las LECAP pero más largas: bonos a tasa fija. Cuanto más lejos el vencimiento, más se mueve el precio si cambian las tasas.",
         "cer": "el capital se ajusta por inflación. La TIR real es lo que ganás por encima de la inflación; la «inflación BE» es la inflación con la que "
                "conviene igual que la tasa fija: si esperás más, conviene el CER.",
-        "tamar": "pagan la TAMAR (tasa de los depósitos grandes) más un margen. La «TAMAR BE» es la tasa promedio con la que rinden igual que la tasa "
-                 "fija: si esperás una TAMAR más alta, convienen estos.",
-        "dual": "pagan lo que resulte mayor entre dos opciones. La columna «Paga» dice cuál gana hoy con los supuestos de arriba.",
-        "dl": "el capital sigue al dólar oficial. El «dólar BE» es el dólar con el que rinden igual que la tasa fija: si creés que el dólar va a terminar "
-              "más arriba, convienen.",
+        "tamar": "pagan la TAMAR (la tasa de los plazos fijos grandes) más un margen. Rinden lo que termine pagando la TAMAR.",
+        "dual": "pagan lo que resulte mayor entre dos opciones: te aseguran un piso y te dejan ganar si sube la otra variable.",
+        "dl": "se pagan en pesos pero siguen al dólar oficial. Rinden lo que ganás en dólares más lo que suba el dólar.",
     }
+
+    def explicacion(k, df):
+        """Cómo funcionan y por qué rinden lo que rinden los TAMAR, los duales y los dólar linked, con un ejemplo con los números de hoy."""
+        pc = lambda v, d=1: num_es(v * 100, d) + "%"
+        if k == "tamar":
+            con_m = df[~df["margen_desconocido"].astype(bool)]
+            e = (con_m if len(con_m) else df).iloc[-1]
+            return (f"**Cómo funcionan.** La TAMAR es la tasa que pagan los bancos privados por los plazos fijos de más de \\$1.000 millones, a 30-35 "
+                    "días; la publica el BCRA todos los días. Estos bonos no tienen una tasa fija: los 100 pesos de capital crecen mes a mes con la TAMAR "
+                    "promedio de toda la vida del bono, más un margen fijo que se definió cuando el Tesoro lo licitó, y se cobra todo junto al vencimiento.\n\n"
+                    "**Por qué rinden lo que rinden.** El pago depende de la TAMAR de acá al vencimiento, que hoy nadie sabe. Para los días que ya pasaron se usa "
+                    f"la TAMAR real; para los que faltan, la app supone {num_es(tamar_sup)}% (lo cambiás arriba). Si las tasas de los plazos fijos suben, "
+                    "cobrás más; si bajan, menos. Por eso convienen cuando creés que las tasas no van a bajar tanto como espera el mercado.\n\n"
+                    f"**Ejemplo con {e.name}.** Paga TAMAR + {num_es(e['margen'] or 0)}% por año. Si la TAMAR se queda en {num_es(tamar_sup)}%, rinde "
+                    f"{pc(e['tirea'])} por año. Su «TAMAR BE» es {num_es(e['tamar_be'])}%: si la TAMAR promedio de acá al vencimiento queda por encima, "
+                    "le gana a una letra a tasa fija del mismo plazo; si queda por debajo, pierde contra ella." +
+                    (f"\n\n**Lo que dice el mercado.** Si la TAMAR se quedara en {num_es(tamar_sup)}%, casi todos rendirían más que la tasa fija. Que el "
+                     f"mercado igual los pague a estos precios quiere decir que espera que la TAMAR baje: en promedio, los precios de hoy equivalen a una "
+                     f"TAMAR de alrededor de {num_es(df['tamar_be'].median())}% de acá al vencimiento (la mediana de las TAMAR BE)."
+                     if tamar_sup > df["tamar_be"].median() + 0.5 else ""))
+        if k == "dual":
+            lineas = []
+            if "fija" in set(df["clase"]):
+                lineas.append("- **" + ", ".join(df.index[df["clase"] == "fija"]) + " (tasa fija / TAMAR):** el capital crece a una tasa fija "
+                              "(2,14% por mes en el TTD26) o a la TAMAR. La tasa fija es tu piso; si las tasas suben mucho, cobrás la TAMAR.")
+            if "cer" in set(df["clase"]):
+                lineas.append("- **" + ", ".join(df.index[df["clase"] == "cer"]) + " (inflación / TAMAR):** el capital ajustado por inflación (CER), "
+                              "o el capital creciendo a TAMAR + 3% por año. Te cubren si sube la inflación o si suben las tasas.")
+            if "dolar" in set(df["clase"]):
+                lineas.append("- **" + ", ".join(df.index[df["clase"] == "dolar"]) + " (dólar / TAMAR):** US\\$ 100 al dólar oficial del vencimiento, o "
+                              "\\$1.499,84 (el dólar del día en que se emitió) creciendo a la TAMAR. Te cubre de una suba del dólar y, si el dólar no sube, "
+                              "cobrás la tasa.")
+            return ("**Cómo funcionan.** Al vencimiento hacen dos cuentas sobre el mismo capital («patas») y te pagan la mayor:\n" + "\n".join(lineas) +
+                    "\n\n**Por qué rinden lo que rinden.** Como siempre cobrás la mejor de las dos, tener las dos vale algo: por eso rinden un poco menos que un "
+                    "bono de una sola pata en el escenario más probable, y más si pasa algo inesperado (mucha inflación, tasas altas o un salto del dólar). La "
+                    "app calcula las dos patas con los supuestos de arriba y se queda con la mayor. «Paga» dice qué pata gana hoy; «Piso», lo que te asegura "
+                    "la pata que no es TAMAR aunque la TAMAR caiga; «TAMAR de cruce», desde qué TAMAR pasa a ganar la pata TAMAR.")
+        cand = df[(df["dias"] >= 120) & (df["vol"] >= 20) & ~df["extrapolado"].astype(bool)]
+        e = (cand if len(cand) else df).iloc[0]
+        return ("**Cómo funcionan.** Se compran y se cobran en pesos, pero lo que devuelven está atado al dólar oficial: al vencimiento te pagan, en pesos, "
+                "US\\$ 100 por cada 100 nominales, al dólar oficial (A3500) de tres días hábiles antes. No pagan intereses en el medio.\n\n"
+                "**Por qué rinden lo que rinden.** Lo que ganás en pesos tiene dos partes: la **TIR en dólares**, por comprarlo por debajo de US\\$ 100, "
+                "y **cuánto suba el dólar oficial** hasta el vencimiento. La segunda no se sabe hoy: la app usa el dólar que ya pacta el mercado de "
+                f"futuros de A3 para cada fecha{' (o la devaluación que elegiste arriba)' if RP['dev_sup'] is not None else ''}. Si el dólar termina "
+                "más arriba, ganás más; si termina más abajo, menos. Convienen frente a la tasa fija si creés que el dólar va a subir más de lo que dice "
+                "la columna «Dólar que lo empata».\n\n"
+                f"**Ejemplo con {e.name}.** Cuesta \\${num_es(e['precio'], 0)} por cada 100 nominales, o sea US\\$ {num_es(e['precio_usd'])} al dólar "
+                f"oficial de hoy (\\${num_es(RP['tc_hoy'])}): si el dólar no se moviera, ganarías {pc(e['tir_usd'])} por año. Para cuando paga se espera "
+                f"un dólar de \\${num_es(e['dolar_esperado'], 0)} ({pc(e['suba_esperada'])} más que hoy), así que por cada \\$100.000 invertidos "
+                f"cobrarías unos \\${num_es(e['cobro_100k'], 0)} el {e['vence']:%d/%m/%Y}: {pc(e['tirea_esperada'])} por año, contra "
+                f"{pc(e['tirea_fija'])} de una tasa fija al mismo plazo.")
     secciones = st.tabs([f"{nombre} ({len(RP[k])})" for k, nombre, _ in P.TIPOS])
     for (k, nombre, desc), sec in zip(P.TIPOS, secciones):
         with sec:
             df = RP[k]
             st.markdown(f"**En pocas palabras:** {EN_POCAS[k]}")
+            if k in ("tamar", "dual", "dl") and not df.empty:
+                with st.container(border=True):
+                    st.markdown(explicacion(k, df))
             st.caption(desc)
             if df.empty:
                 st.info("Sin datos para este tipo de bono."); continue
@@ -781,16 +882,35 @@ with tabP:
                          "cruce_t": "TAMAR de cruce", "margen_s_tamar": "Margen s/ TAMAR"}, calor={"var": "var"})
                 ver_grafico(grafico_pesos(df, "tirea", cf, "#2a78d6", "TIREA estimada"))
             else:
-                ult = df.iloc[-1]
-                st.markdown(f"A3500 hoy **\\${RP['tc_hoy']:,.2f}** · Dólar breakeven {ult['vence']:%m/%Y}: **\\${ult['dolar_be']:,.0f}** ({ult['deval_total']:+.1%})")
-                cols = ["vence", "dias", "precio", "precio_usd", "var", "tir_usd", "dolar_be", "deval_mensual", "tirea_esperada", "vs_fija_pb", "md", "vol"]
-                mostrar(df[cols],
-                        {**COM, "precio": "{:,.0f}", "precio_usd": "{:.2f}", "tir_usd": "{:.2%}", "dolar_be": "${:,.2f}", "deval_mensual": "{:.2%}",
-                         "tirea_esperada": "{:.2%}", "vs_fija_pb": "{:+.0f}"},
-                        {**NOM, "precio": "Precio $", "precio_usd": "Precio USD", "tir_usd": "TIR USD", "dolar_be": "Dólar BE", "deval_mensual": "Deval. mensual",
-                         "tirea_esperada": "TIREA $ esperada", "vs_fija_pb": "vs tasa fija (pb)"},
-                        na="= curva", calor={"var": "var"})
-                ver_grafico(grafico_pesos(df[df["dias"] >= 15], "deval_mensual", None, "#1baf7a", "Devaluación mensual implícita"))
+                le_gana = df[(df["dias"] >= 30) & (df["vs_fija_pb"] > 0)]
+                st.markdown(f"Dólar oficial hoy **\\${num_es(RP['tc_hoy'])}** · dólar esperado: **{RP['fuente_dolar']}** · "
+                            f"con ese dólar, **{len(le_gana)} de {int((df['dias'] >= 30).sum())}** rinden más que la tasa fija")
+                t = df.copy()
+                t.index = [i + (" *" if x else "") + (" °" if v < 20 else "") for i, x, v in zip(t.index, t["extrapolado"], t["vol"])]
+                cols = ["vence", "dias", "precio", "precio_usd", "tir_usd", "dolar_esperado", "suba_esperada", "tirea_esperada", "tirea_fija", "vs_fija_pb",
+                        "cobro_100k", "dolar_be", "var", "vol"]
+                mostrar(t[cols],
+                        {**COM, "precio": "{:,.0f}", "precio_usd": "{:.2f}", "tir_usd": "{:.2%}", "dolar_esperado": "${:,.0f}", "suba_esperada": "{:+.1%}",
+                         "tirea_esperada": "{:.2%}", "tirea_fija": "{:.2%}", "vs_fija_pb": "{:+.0f}", "cobro_100k": "${:,.0f}", "dolar_be": "${:,.0f}"},
+                        {**NOM, "precio": "Precio $", "precio_usd": "Precio en US$", "tir_usd": "TIR en dólares", "dolar_esperado": "Dólar esperado al cobro",
+                         "suba_esperada": "Suba del dólar", "tirea_esperada": "Rinde en pesos (TIREA)", "tirea_fija": "Tasa fija mismo plazo",
+                         "vs_fija_pb": "Diferencia (pb)", "cobro_100k": "Cobrás por cada $100.000", "dolar_be": "Dólar que lo empata"},
+                        calor={"var": "var"})
+                ver_grafico(grafico_dl(df, cf))
+                notas_dl = []
+                cortos = df.index[df["dias"] < 30].tolist()
+                if cortos:
+                    notas_dl.append(f"{', '.join(cortos)} vence en menos de 30 días: con tan poco plazo, una diferencia mínima de precio cambia mucho la tasa, "
+                                    "por eso no se grafica")
+                ext = df.index[df["extrapolado"].astype(bool)].tolist()
+                if ext and FD_ is not None:
+                    notas_dl.append(f"* {', '.join(ext)}: vencen después del último futuro de A3 ({FD_.ultimo_contrato:%m/%Y}); desde ahí se supone que el dólar "
+                                    f"sigue subiendo {num_es(FD_.mensual_despues * 100)}% por mes, así que su rendimiento es más incierto (punto hueco en el gráfico)")
+                poco = df.index[df["vol"] < 20].tolist()
+                if poco:
+                    notas_dl.append(f"° {', '.join(poco)}: casi no se operó hoy, el precio puede no estar actualizado (punto claro)")
+                if notas_dl:
+                    st.caption(" · ".join(notas_dl) + ".")
             st.caption(NOTAS[k])
 
 # ── Mi portafolio: cartera propia con riesgo de tasa, VaR y tipo de cartera ──
@@ -846,7 +966,7 @@ with tabPF:
                                            "Nominales": st.column_config.NumberColumn("Nominales (VN)", min_value=0, step=1000, format="%d")})
     g1_, g2_ = st.columns([1, 2.2])
     with g1_:
-        st.download_button("Guardar mi portafolio (CSV)", ed.dropna().to_csv(index=False).encode("utf-8"), file_name="mi_portafolio_bondai.csv",
+        st.download_button("Guardar mi portafolio (CSV)", ed.dropna().to_csv(index=False).encode("utf-8"), file_name="mi_portafolio_bond_analytics.csv",
                            mime="text/csv", on_click="ignore", help="Baja un archivo con tus bonos y nominales para volver a subirlo otro día.")
         if st.session_state.get("_pf_aviso"):
             st.caption(st.session_state["_pf_aviso"])
@@ -1158,7 +1278,7 @@ with tabF:
         F["vp"] = F["total"] / (1 + y_nom) ** (F["dias"] / 365)
         k = vn_f / 100
         st.caption(f"{bono_f} · {tipo_de[bono_f]} · {fila.get('condicion', '')} · liquida {s0:%d/%m/%Y}. Los pagos en pesos se proyectan con los supuestos de la "
-                   "pestaña Tesoro en pesos (CER con IPC publicado → REM → inflación elegida; TAMAR supuesta; devaluación implícita o elegida).")
+                   "pestaña Tesoro en pesos (CER con IPC publicado → REM → inflación elegida; TAMAR supuesta; dólar de los futuros de A3 o devaluación elegida).")
         cols = st.columns(5)
         cols[0].metric("Inversión", f"$ {num_es(px_f * k, 0)}", f"{num_es(vn_f, 0)} VN a {num_es(px_f)}", delta_color="off")
         cols[1].metric("Total a cobrar (proyectado)", f"$ {num_es(F['total'].sum() * k, 0)}", f"{F['total'].sum() / px_f - 1:+.1%} sobre lo invertido", delta_color="off")
@@ -1325,7 +1445,7 @@ with tab4:
                       else f"{(v['fin'] - v['inicio']) * 100:+.0f} pb")
                 c_.metric(I.NOMBRE_SIMPLE.get(k, v["nombre"]), fmt(v["fin"]), d_, delta_color="inverse" if k in ("riesgo_pais", "tir_soberanos", "tirea_fija") else "normal",
                           help=I.QUE_MIDE.get(k))
-        st.download_button("Descargar el informe en PDF", INF["pdf"], file_name=f"BondAI_informe_semanal_{INF['fin']:%Y%m%d}.pdf", mime="application/pdf",
+        st.download_button("Descargar el informe en PDF", INF["pdf"], file_name=f"Bond_Analytics_informe_semanal_{INF['fin']:%Y%m%d}.pdf", mime="application/pdf",
                            type="primary", on_click="ignore")
         for par in [x.strip() for x in INF["texto"].split("\n\n") if x.strip()]:   # cada párrafo con su título, para leerlo de corrido
             m_ = re.match(r"^([^:]{3,60}):\s*(.*)$", par, re.S)

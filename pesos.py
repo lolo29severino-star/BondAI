@@ -1,5 +1,5 @@
 """
-pesos.py — bonos del Tesoro en pesos para la app BondAI (LECAP, BONCAP/BONTE, CER, TAMAR, duales y dólar linked).
+pesos.py — bonos del Tesoro en pesos para la app Bond Analytics (LECAP, BONCAP/BONTE, CER, TAMAR, duales y dólar linked).
 
 Uso desde la app:
     import pesos as P
@@ -361,12 +361,35 @@ def _proyectar_cer(cer, hasta, ipc):
 
 
 # ── cálculo principal ──
-def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicado=None, rem_mensual=None, dev=None, margenes=None, curva_be="auto"):
+def dolar_esperado_futuros(tf, spot, fecha_futuros):
+    """Dólar oficial (A3500) que esperan los futuros de dólar de A3 para cada fecha.
+    tf: tabla de externos.devaluacion_futuros (columnas dias, ajuste y mensual), spot: A3500 del día de los futuros.
+    Entre dos contratos se supone una devaluación diaria pareja; después del último contrato, el dólar sigue subiendo
+    a la devaluación mensual promedio que descuenta ese último contrato."""
+    xs = [0] + [int(x) for x in tf["dias"]]
+    ys = [float(np.log(spot))] + [float(np.log(a)) for a in tf["ajuste"]]
+    m_ult = float(tf["mensual"].iloc[-1])
+    f0 = pd.Timestamp(fecha_futuros).date()
+
+    def f(fecha):
+        d = (pd.Timestamp(fecha).date() - f0).days
+        if d <= xs[-1]:
+            return float(np.exp(np.interp(max(d, 0), xs, ys)))
+        return float(np.exp(ys[-1]) * (1 + m_ult) ** ((d - xs[-1]) / 30))
+    f.ultimo_contrato = f0 + timedelta(days=xs[-1])
+    f.mensual_despues = m_ult
+    return f
+
+
+def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicado=None, rem_mensual=None, dev=None, margenes=None, curva_be="auto",
+             dolar_fut=None):
     """Devuelve un DataFrame por tipo de bono y los supuestos usados.
     plazo: 'CI' o '24HS'. precio: 'px' (VWAP), 'last' (último) o 'prev' (cierre anterior).
     tamar: TAMAR futura supuesta (TNA %, por defecto el promedio de las últimas 5 ruedas).
     infl: inflación mensual (decimal) después del último mes del REM.
-    dev: devaluación mensual esperada (decimal) para dólar linked y TMVE8; None = la implícita en la curva.
+    dev: devaluación mensual esperada (decimal) para dólar linked y TMVE8. Si es None se usa dolar_fut.
+    dolar_fut: función fecha -> A3500 esperado (dolar_esperado_futuros, con los futuros de A3). Si también es None, se usa la
+    devaluación implícita en la curva dólar linked (la que los empata con la tasa fija).
     margenes: dict ticker -> margen TAMAR (puntos de TNA) para reemplazar el de la licitación.
     curva_be: curva de tasa fija contra la que se despeja la inflación breakeven de cada CER: 'auto' (mejor ajuste, como
     Bonerío Local), un modelo de MODELOS_CURVA o 'interp' (rectas entre las LECAP/BONCAP)."""
@@ -555,10 +578,25 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
         out["dl"].append(r)
     devs = [(r["dias"], r["deval_mensual"]) for r in out["dl"] if r["dias"] >= 15]
     dev_de = lambda d: dev if dev is not None else (_interp(devs, d) if devs else 0.015)
+    if dev is not None:
+        fuente_dolar = f"devaluación elegida ({dev:.2%} por mes)"
+    elif dolar_fut is not None:
+        fuente_dolar = "futuros de dólar de A3"
+    else:
+        fuente_dolar = "devaluación implícita en la curva dólar linked"
+
+    def dolar_al(v, d):
+        """A3500 esperado al vencimiento: la devaluación elegida, el futuro de A3 o la implícita, en ese orden."""
+        if dev is None and dolar_fut is not None:
+            return dolar_fut(restar_habiles(v, 3))   # pagan al A3500 de 3 hábiles antes del vencimiento
+        return tc_hoy * (1 + dev_de(d)) ** (d / 30)
     for r in out["dl"]:
-        dv = dev_de(r["dias"]); te = tir_de(100 * tc_hoy * (1 + dv) ** (r["dias"] / 30), r["precio"], r["dias"])
-        r.update(deval_usada=dv, tirea_esperada=te, vs_fija_pb=(te - curva_fija(r["dias"] / 365)) * 1e4 if dev is not None else np.nan)
-        tc_fin = tc_hoy * (1 + dv) ** (r["dias"] / 30)
+        tc_fin = dolar_al(r["vence"], r["dias"])
+        te = tir_de(100 * tc_fin, r["precio"], r["dias"]); fija_ = curva_fija(r["dias"] / 365)
+        r.update(dolar_esperado=tc_fin, suba_esperada=tc_fin / tc_hoy - 1, deval_usada=(tc_fin / tc_hoy) ** (30 / r["dias"]) - 1,
+                 extrapolado=bool(dev is None and dolar_fut is not None and restar_habiles(r["vence"], 3) > getattr(dolar_fut, "ultimo_contrato", date.max)),
+                 tirea_esperada=te, tirea_fija=fija_, cobro_100k=100_000 * 100 * tc_fin / r["precio"],
+                 vs_fija_pb=(te - fija_) * 1e4 if (dev is not None or dolar_fut is not None) else np.nan)
         flujos[r["ticker"]] = [{"fecha": ajustar_pago(r["vence"]), "renta": 0.0, "capital": 100 * tc_fin, "usd": 100.0, "tc": tc_fin}]
 
     # duales
@@ -575,7 +613,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
             pa, nombre = 100 * _proyectar_cer(cer, restar_habiles(v, 10), ipc) / base, "CER"
             piso, piso_txt = tir_de(100 * cref / base, r["precio"], d), "real"
         else:
-            pa, nombre = 100 * tc_hoy * (1 + dev_de(d)) ** (d / 30), "Dólar"
+            pa, nombre = 100 * dolar_al(v, d), "Dólar"
             pb *= b["tc0"]; piso, piso_txt = tir_de(100 * tc_hoy, r["precio"], d), "USD"
         k = b["tc0"] if b["clase"] == "dolar" else 1
         cruce = biseccion(lambda x: pata_tamar(em, v, b["m"], x)[0] * k, pa)
@@ -589,7 +627,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
 
     res = {k: (pd.DataFrame(v).sort_values("vence").set_index("ticker") if v else pd.DataFrame()) for k, v in out.items()}
     res.update(curva_fija=curva_fija, curva_cer=fit_cer, liq=s, tamar_hoy=tamar_hoy, tamar_sup=tamar, infl_sup=infl, tc_hoy=tc_hoy, tc_fecha=tc_fecha,
-               max_cero=max_cero, cer_ultimo=cer_ult, dev_sup=dev, curva_be=tasa_be, curva_be_nombre=nombre_be, curva_be_error_pb=err_be,
+               max_cero=max_cero, cer_ultimo=cer_ult, dev_sup=dev, fuente_dolar=fuente_dolar, curva_be=tasa_be, curva_be_nombre=nombre_be, curva_be_error_pb=err_be,
                curva_be_errores=errores_be, be_aux=be_aux, despejar=despejar, cref=cref, ipc_pub=ipc_pub, rem=rem,
                flujos={t: pd.DataFrame(v) for t, v in flujos.items() if v})
     return res

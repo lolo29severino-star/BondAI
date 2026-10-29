@@ -1,5 +1,5 @@
 """
-portafolio.py — tu propia cartera de bonos para la app BondAI.
+portafolio.py — tu propia cartera de bonos para la app Bond Analytics.
 
 Cargás bonos y nominales y la app calcula: valor de mercado, duración modificada, DV01, convexidad, key rate durations (KRD),
 escenarios de tasas con revaluación completa de los flujos, VaR histórico y qué tipo de cartera es (bullet, barbell o ladder).

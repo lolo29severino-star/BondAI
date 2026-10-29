@@ -1,5 +1,5 @@
 """
-externos.py — datos de otras fuentes para la app BondAI: futuros de dólar (A3 Mercados, ex Matba Rofex), riesgo país
+externos.py — datos de otras fuentes para la app Bond Analytics: futuros de dólar (A3 Mercados, ex Matba Rofex), riesgo país
 (ArgentinaDatos, EMBI de JP Morgan), curva del Tesoro de EE.UU. y obligaciones negociables (data912).
 
 Uso desde la app:
@@ -35,7 +35,7 @@ A3_API = "https://apicem.matbarofex.com.ar/api/v2/closing-prices"
 RIESGO_API = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais"
 UST_CSV = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/{y}/all?type=daily_treasury_yield_curve&field_tdr_date_value={y}&page&_format=csv"
 DATA912 = "https://data912.com/live/arg_corp"
-UA = {"User-Agent": "Mozilla/5.0 (BondAI, trabajo académico)"}
+UA = {"User-Agent": "Mozilla/5.0 (Bond Analytics, trabajo académico)"}
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 

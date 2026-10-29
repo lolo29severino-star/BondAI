@@ -1,5 +1,5 @@
 """
-informe.py — informe semanal de renta fija argentina en PDF, para la pestaña «Informe semanal con IA» de BondAI.
+informe.py — informe semanal de renta fija argentina en PDF, para la pestaña «Informe semanal con IA» de Bond Analytics.
 
 Qué hace:
   1. Baja los cierres diarios de BYMA (24 hs) de las últimas semanas de cada bono (o usa el respaldo del 09/10/2026).
@@ -12,7 +12,7 @@ Qué hace:
   5. Un LLM (Claude) redacta el resumen usando SOLO esos números, para alguien que no sabe de finanzas: frases cortas, pocos números
      y cada término explicado. Sin clave se usa una plantilla que sigue las mismas reglas.
   6. Arma un PDF fácil de leer: tarjetas con los números de la semana, el resumen con títulos, gráficos con «cómo leerlo», tu
-     portafolio, un anexo con las tablas y un glosario.
+     portafolio y un anexo con las tablas.
 
 Uso desde la app:
     import informe as I
@@ -698,33 +698,9 @@ QUE_MIDE = {"riesgo_pais": "Cuánto más que Estados Unidos le cobra el mercado 
             "tir_soberanos": "La ganancia por año del bono típico del Estado en dólares (mediana de Bonares y Globales).",
             "tirea_fija": "La ganancia por año de la letra típica a tasa fija en pesos (mediana de LECAP y BONCAP).",
             "tir_cer": "Cuánto rinde por año, por encima de la inflación, el bono CER típico."}
-GLOSARIO = [
-    ("Bono", "Un préstamo que le hacés al Estado o a una empresa: a cambio te paga intereses (renta) y te devuelve el capital (amortización)."),
-    ("Precio", "Lo que cuesta cada 100 de valor nominal, es decir, de lo que el bono prometía devolver al emitirse."),
-    ("TIR", "La ganancia por año si comprás el bono hoy y lo tenés hasta que vence. Cuando el precio sube, la TIR baja, y al revés."),
-    ("TEM y TIREA", "La tasa de un bono en pesos expresada por mes (TEM) o por año reinvirtiendo los intereses (TIREA)."),
-    ("Punto básico (pb)", "La centésima parte de un punto porcentual: 100 pb = 1%."),
-    ("Riesgo país", "Cuánto más que Estados Unidos le cobra el mercado a la Argentina para prestarle plata, en puntos básicos."),
-    ("Dólar MEP, cable y oficial", "El MEP se compra con bonos en la bolsa; el cable sirve para girar al exterior; el oficial (A3500) lo publica el BCRA."),
-    ("Bonares y Globales", "Bonos del Estado en dólares: los Bonares se rigen por ley argentina y los Globales por ley de Nueva York."),
-    ("LECAP y BONCAP", "Letras y bonos del Tesoro a tasa fija en pesos: sabés hoy cuántos pesos vas a cobrar."),
-    ("CER", "Bonos cuyo capital se ajusta por inflación. Su TIR real es lo que ganan por encima de la inflación."),
-    ("TAMAR y duales", "Bonos que pagan una tasa variable (la de los depósitos grandes) o lo mejor entre dos opciones."),
-    ("Dólar linked", "Bonos en pesos atados al dólar oficial: sirven para cubrirse de una devaluación."),
-    ("ON (obligación negociable)", "Un bono que emite una empresa para financiarse; casi siempre paga en dólares."),
-    ("Inflación breakeven", "La inflación que esperan los precios de los bonos: con esa inflación un CER y una tasa fija pagan lo mismo."),
-    ("REM", "La encuesta del BCRA a economistas sobre la inflación que esperan."),
-    ("Licitación del Tesoro", "Cuando el Estado vende bonos nuevos para conseguir pesos."),
-    ("Duración", "Qué tanto se mueve el precio si cambian las tasas: con duración 3, si las tasas suben 1 punto, el bono cae cerca de 3%."),
-    ("DV01", "Lo que pierde la cartera, en plata, si todas las tasas suben 1 punto básico."),
-    ("VaR", "Cuánto podrías perder en un día malo: la pérdida que solo se superó en 1 de cada 20 días."),
-    ("Retorno y aporte", "Retorno: cuánto ganó un bono o la cartera. Aporte: cuánto del resultado de la cartera explica cada bono (peso x retorno)."),
-]
-
-
 def pdf(S, texto, origen="", ctx=None):
     """Arma el PDF y devuelve sus bytes. Pensado para quien no sabe de finanzas: tarjetas con los números de la semana, el resumen
-    con títulos, gráficos con «cómo leerlo», tu portafolio, un anexo con las tablas y un glosario.
+    con títulos, gráficos con «cómo leerlo», tu portafolio y un anexo con las tablas.
     ctx: el contexto completo que recibió el LLM (con la agenda y el portafolio que arma la app); si falta, se usa S['contexto']."""
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_LEFT
@@ -762,7 +738,7 @@ def pdf(S, texto, origen="", ctx=None):
         img = Image(png); img.drawHeight = ancho * img.imageHeight / img.imageWidth; img.drawWidth = ancho
         return img
 
-    hist = [Paragraph("BondAI · Informe semanal", tit),
+    hist = [Paragraph("Bond Analytics · Informe semanal", tit),
             Paragraph(_limpio(f"Cómo se movieron los bonos argentinos entre el {ini.day} de {MESES[ini.month - 1]} y el {fin.day} de "
                               f"{MESES[fin.month - 1]} de {fin.year}"), sub),
             Paragraph(_limpio(f"Precios: {S['fuente_precios']} · generado el {datetime.now():%d/%m/%Y %H:%M} · texto: {origen}"), meta)]
@@ -961,25 +937,21 @@ def pdf(S, texto, origen="", ctx=None):
                      t, Paragraph(_limpio("Montos en dólares por cada 100 de valor nominal. Las fechas son estimadas: confirmalas en el aviso de pago de "
                                           "cada empresa. Para cobrar hay que tener la ON el día hábil anterior."), leer)]
 
-    # ── glosario y metodología ──
-    filas = [[Paragraph(_limpio(t_), celda_b), Paragraph(_limpio(d_), celda)] for t_, d_ in GLOSARIO]
-    t = Table(filas, colWidths=[4 * cm, 13 * cm])
-    t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, -1), .3, colors.HexColor("#E2E4EA")),
-                           ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
-    hist += [Paragraph("Glosario", h2), t, Spacer(1, 10), Paragraph(_limpio(
+    # ── cómo se hizo ──
+    hist += [Spacer(1, 10), Paragraph(_limpio(
         "Cómo se hizo: precios de cierre de BYMA (24 hs); los bonos en dólares, en dólar MEP. Cada tasa se calcula con el mismo método de la app: "
         "TIR de los flujos para los bonos en dólares y las ONs, TIREA del pago final para LECAP y BONCAP y TIR real para los CER. Se compara el "
         "último cierre con el de una semana antes. Fuentes: BYMA Open Data, BCRA, ArgentinaDatos, A3 Mercados, data912 y Secretaría de Finanzas. "
-        "El texto lo redacta un modelo de lenguaje (Claude, de Anthropic) solo con esos números. Herramienta académica (Programación para "
-        "Economistas, UCA): no es recomendación de inversión."), chico)]
+        "El texto lo redacta un modelo de lenguaje (Claude, de Anthropic) solo con esos números. Herramienta académica: no es "
+        "recomendación de inversión."), chico)]
 
     def pie(canvas, doc):
         canvas.saveState(); canvas.setFont("Helvetica", 7.5); canvas.setFillColor(colors.HexColor("#6B7085"))
-        canvas.drawString(2 * cm, 1.2 * cm, "BondAI · informe semanal · no es recomendación de inversión")
+        canvas.drawString(2 * cm, 1.2 * cm, "Bond Analytics · informe semanal · no es recomendación de inversión")
         canvas.drawRightString(A4[0] - 2 * cm, 1.2 * cm, f"página {doc.page}")
         canvas.restoreState()
 
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=1.7 * cm, bottomMargin=1.8 * cm,
-                      title=f"BondAI - Informe semanal {fin:%d-%m-%Y}", author="BondAI").build(hist, onFirstPage=pie, onLaterPages=pie)
+                      title=f"Bond Analytics - Informe semanal {fin:%d-%m-%Y}", author="Bond Analytics").build(hist, onFirstPage=pie, onLaterPages=pie)
     return buf.getvalue()

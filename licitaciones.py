@@ -467,7 +467,7 @@ def actualizar(usar_api, cer, tamar, a3500, hoy=None):
             import urllib3
             urllib3.disable_warnings()
             ses = requests.Session()
-            ses.headers["User-Agent"] = "Mozilla/5.0 (BondAI, trabajo práctico UCA)"
+            ses.headers["User-Agent"] = "Mozilla/5.0 (Bond Analytics, trabajo práctico UCA)"
             lista = listar_noticias(ses.get(LISTADO, timeout=(5, 15)).text)
             ult = max(date.fromisoformat(x["f"]) for x in subs)
             S = {"cer": cer, "tamar": tamar, "a3500": serie_a3500(a3500)}

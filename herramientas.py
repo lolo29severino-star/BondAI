@@ -1,5 +1,5 @@
 """
-herramientas.py — tres herramientas de BondAI que se apoyan en los cálculos de los otros módulos.
+herramientas.py — tres herramientas de Bond Analytics que se apoyan en los cálculos de los otros módulos.
 
   1. Fichas de las ONs de los grandes emisores y su curva contra la de los soberanos   → spread_ons, EMISORES_TOP   (pestaña «ONs»)
   2. Retorno de los bonos en dólares hasta una fecha según la TIR a la que se venda      → retorno_hasta, tabla_retornos   (pestaña «Curva en dólares»)
