@@ -5,16 +5,19 @@ Qué hace:
   1. Baja los cierres diarios de BYMA (24 hs) de las últimas semanas de cada bono (o usa el respaldo del 09/10/2026).
   2. Toma la última rueda disponible y la de una semana antes, y calcula para cada bono la variación del precio y de su tasa
      (TIR en dólares para Bonares, Globales y Tesoro USD; TIREA para LECAP y BONCAP; TIR real para los CER cupón cero).
-  3. Suma el riesgo país, los dólares (MEP, cable, A3500 y brecha), la TAMAR, la licitación de la semana, el dólar futuro y la
-     inflación breakeven de hoy.
-  4. Un LLM (Claude) redacta el resumen ejecutivo usando SOLO esos números; sin clave se usa una plantilla determinística.
-  5. Arma un PDF con el texto, una tabla de indicadores, gráficos y las mayores subas y bajas.
+  3. Suma el riesgo país, los dólares (MEP, cable, A3500 y brecha), la TAMAR, la licitación de la semana, el dólar futuro, la
+     inflación breakeven, el carry trade, el mercado de dinero y la agenda de las dos semanas siguientes.
+  4. Si hay un portafolio cargado en «Mi portafolio», calcula cómo le fue en la semana (retorno, aporte de cada bono, precios) y
+     sus indicadores: duración, DV01, convexidad, tipo de cartera, exposición y VaR (contexto_portafolio).
+  5. Un LLM (Claude) redacta el resumen ejecutivo usando SOLO esos números; sin clave se usa una plantilla determinística.
+  6. Arma un PDF con el texto, una tabla de indicadores, gráficos y tablas.
 
 Uso desde la app:
     import informe as I
     S = I.semana(usar_api, cer, tamar, riesgo, dolares, licitaciones, extra)   # números de la semana
-    texto, origen = I.redactar(S["contexto"])                                 # Claude o plantilla
-    pdf = I.pdf(S, texto, origen)                                              # bytes del PDF
+    ctx = {**S["contexto"], "portafolio": I.contexto_portafolio(C, R, H, U, S["ini"], S["fin"])}   # (opcional) tu cartera
+    texto, origen = I.redactar(ctx)                                            # Claude o plantilla
+    pdf = I.pdf(S, texto, origen, ctx)                                         # bytes del PDF
 """
 import io
 import json
@@ -331,20 +334,116 @@ def agenda(desde, hasta, ons=()):
                         "corridas al día hábil siguiente; montos en US$ por 100 VN"}
 
 
+def historia_cartera(H_largo, simbolos, usar_api=True):
+    """Historia de los bonos de la cartera para el informe: la larga de la pestaña «Mi portafolio» (portafolio.historicos, que
+    puede ser el respaldo del 09/10/2026) completada con los cierres de las últimas semanas (historias), así cubre la semana."""
+    rec, _ = historias(simbolos, usar_api)
+    out = {}
+    for s in simbolos:
+        x = pd.concat([(H_largo or {}).get(s, pd.Series(dtype=float)), rec.get(s, pd.Series(dtype=float))])
+        out[s] = x[~x.index.duplicated(keep="last")].sort_index()
+    return out
+
+
+def contexto_portafolio(C, R, Hh, U, ini, fin, moneda="ARS", tabla=None, ons=None):
+    """Cómo le fue a tu cartera (pestaña «Mi portafolio») en la semana del informe y qué dicen sus indicadores.
+    C: portafolio.cartera; R: portafolio.retornos (retornos diarios de cada bono con los cupones sumados, en la moneda de
+    valuación); Hh: portafolio.historicos (cierres por símbolo); U: el universo de bonos; tabla y ons: las tablas de semana(),
+    de donde sale la tasa de cada bono al inicio y al final de la semana. Los pesos son los de hoy.
+    Las claves que empiezan con «_» son para el PDF (no van al modelo de lenguaje)."""
+    if C is None or C.empty:
+        return None
+    RS, TC = PF.resumen(C), PF.tipo_cartera(C)
+    mon = "US$" if moneda == "USD" else "$"
+    i0, f0 = pd.Timestamp(ini), pd.Timestamp(fin)
+    R = R if R is not None else pd.DataFrame()
+    cols = [t for t in C.index if t in R.columns]
+    rp = (R[cols].fillna(0) * C.loc[cols, "peso"]).sum(axis=1) if cols else pd.Series(dtype=float)   # retorno diario de la cartera
+    Rw = R[(R.index > i0) & (R.index <= f0)] if len(R) else R
+    rpw = rp[(rp.index > i0) & (rp.index <= f0)]
+    ret = float((1 + rpw).prod() - 1) if len(rpw) else np.nan
+    bonos = []
+    for t, r in C.sort_values("valor", ascending=False).iterrows():
+        px = (Hh or {}).get(U[t]["simbolo"], pd.Series(dtype=float))
+        p0, p1 = (_valor(px.dropna(), ini), _valor(px.dropna(), fin)) if len(px) else (np.nan, np.nan)
+        rt = float((1 + Rw[t].dropna()).prod() - 1) if t in Rw and Rw[t].notna().any() else np.nan
+        y0 = y1 = np.nan
+        if tabla is not None and len(tabla) and t in tabla.index:
+            y0, y1 = tabla.loc[t, "tasa_ini"], tabla.loc[t, "tasa_fin"]
+        elif ons is not None and len(ons) and t in ons.index:
+            y0, y1 = ons.loc[t, "tir_ini"], ons.loc[t, "tir_fin"]
+        dy = (y1 - y0) * 1e4 if np.isfinite(y0) and np.isfinite(y1) else np.nan
+        bonos.append({"ticker": t, "grupo": PF.GRUPOS.get(r["grupo"], r["grupo"]), "peso_%": _r(r["peso"] * 100, 1), "md": _r(r["md"]),
+                      "precio_ini": _r(p0), "precio_fin": _r(p1), "var_precio_%": _r((p1 / p0 - 1) * 100) if p0 and np.isfinite(p0) else None,
+                      "retorno_semana_%": _r(rt * 100), "aporte_pp": _r(r["peso"] * rt * 100), "cambio_tasa_pb": _r(dy, 0)})
+    con_tasa = [b for b in bonos if b["cambio_tasa_pb"] is not None]
+    peso_tasa = sum(b["peso_%"] for b in con_tasa) / 100
+    efecto = sum(-b["md"] * b["cambio_tasa_pb"] / 100 * b["peso_%"] / 100 for b in con_tasa) if con_tasa else None
+    dy_med = sum(b["cambio_tasa_pb"] * b["peso_%"] for b in con_tasa) / sum(b["peso_%"] for b in con_tasa) if con_tasa else None
+    por_grupo = {}
+    for b in bonos:
+        g = por_grupo.setdefault(b["grupo"], {"peso_%": 0.0, "aporte_pp": 0.0})
+        g["peso_%"] += b["peso_%"] or 0; g["aporte_pp"] += b["aporte_pp"] or 0
+    for g in por_grupo.values():
+        g["retorno_%"] = _r(g["aporte_pp"] / g["peso_%"] * 100) if g["peso_%"] else None
+        g["peso_%"], g["aporte_pp"] = _r(g["peso_%"], 1), _r(g["aporte_pp"])
+    ordenados = sorted([b for b in bonos if b["aporte_pp"] is not None], key=lambda b: b["aporte_pp"])
+    var = None
+    if len(cols) and len(R) >= 60:
+        try:
+            v = PF.var_historico(R[cols].fillna(0), C.loc[cols, "valor"], 0.95, 1, 500)
+            var = {"var_95_1_dia": _r(v["var"], 0), "var_%": _r(v["var_pct"] * 100), "perdida_promedio_peor_5%": _r(v["es"], 0),
+                   "volatilidad_anual_%": _r(v["vol_anual"] * 100, 1), "ruedas": int(v["ruedas"])}
+        except Exception:
+            var = None
+    dias_sem = [{"fecha": f"{d:%d/%m}", "retorno_%": _r(x * 100)} for d, x in rpw.items()]
+    serie = (1 + rp[(rp.index > f0 - pd.Timedelta(days=92)) & (rp.index <= f0)]).cumprod() * 100 if len(rp) else pd.Series(dtype=float)
+    out = {"moneda": mon, "valor_hoy": _r(RS["valor"], 0), "bonos": len(C),
+           "retorno_semana_%": _r(ret * 100), "resultado_aprox": _r(RS["valor"] * ret / (1 + ret), 0) if np.isfinite(ret) else None,
+           "dias_de_la_semana": dias_sem,
+           "mejor_bono": [ordenados[-1]["ticker"], ordenados[-1]["retorno_semana_%"]] if ordenados else None,
+           "peor_bono": [ordenados[0]["ticker"], ordenados[0]["retorno_semana_%"]] if ordenados else None,
+           "por_grupo": por_grupo, "bonos_detalle": bonos,
+           "indicadores": {"duracion_modificada": _r(RS["md"]), "dv01": _r(RS["dv01"], 0), "convexidad": _r(RS["convexidad"], 1),
+                           "plazo_promedio_anios": _r(RS["plazo_dias"] / 365), "tasa_por_grupo_%": {PF.GRUPOS.get(k, k): _r(v * 100) for k, v in RS["tir_por_grupo"].items()},
+                           "mayor_exposicion": [PF.GRUPOS.get(RS["mayor_grupo"], RS["mayor_grupo"]), _r(RS["mayor_peso"] * 100, 0)],
+                           "bonos_efectivos": _r(RS["efectivos"], 1), "tipo_de_cartera": [TC["tipo"], TC["explicacion"]],
+                           "riesgo": var},
+           "tasas_en_la_semana": {"cambio_promedio_pb": _r(dy_med, 0), "peso_con_dato_%": _r(peso_tasa * 100, 0),
+                                  "efecto_de_la_duracion_pp": _r(efecto), "resto_pp": _r(ret * 100 - efecto) if efecto is not None and np.isfinite(ret) else None},
+           "como_leerlo": ("retornos con los pesos de hoy y los cupones cobrados; efecto_de_la_duracion_pp ≈ −MD × cambio de tasa de cada bono "
+                           "(cuánto del resultado explican las tasas); resto_pp = devengamiento, cupones, tipo de cambio y lo que la duración no capta; "
+                           "dv01: cuánto pierde la cartera si todas las tasas suben 1 pb; VaR 95% a 1 día: la pérdida diaria que solo se superó "
+                           "en 1 de cada 20 ruedas del período"),
+           "_serie": [[f"{d:%Y-%m-%d}", round(float(v), 3)] for d, v in serie.items()], "_ini": f"{ini:%Y-%m-%d}", "_fin": f"{fin:%Y-%m-%d}"}
+    return out
+
+
+def _para_llm(ctx):
+    """El contexto sin las claves internas del PDF (las que empiezan con «_»)."""
+    limpio = lambda d: {k: (limpio(v) if isinstance(v, dict) else v) for k, v in d.items() if not str(k).startswith("_")}
+    return limpio(ctx)
+
+
 # ───────────────────────────── texto ─────────────────────────────
 PROMPT = ("Sos analista de renta fija en Argentina y escribís el informe semanal de un equipo de research para estudiantes de economía. "
           "Español rioplatense neutro, frases claras. Usás SOLO los números del JSON (no inventes datos, no agregues noticias ni "
-          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí 8 párrafos cortos separados por una "
-          "línea en blanco; cada uno empieza con un título corto seguido de dos puntos: 'La semana en una línea', 'Dólar y riesgo país', "
-          "'Bonos en dólares', 'Obligaciones negociables', 'Bonos en pesos', 'Carry trade y mercado de dinero', 'Licitación y agenda' y "
-          "'Riesgos'. En 'Obligaciones negociables' resumí cómo se movieron las ONs más operadas (precio, TIR y su diferencia contra los "
+          "explicaciones causales que no surjan de los números) y respetás sus redondeos. Escribí párrafos cortos separados por una "
+          "línea en blanco; cada uno empieza con un título corto seguido de dos puntos, en este orden: 'La semana en una línea', 'Dólar y "
+          "riesgo país', 'Bonos en dólares', 'Obligaciones negociables', 'Bonos en pesos', 'Tu portafolio' e 'Indicadores de tu portafolio' "
+          "(estos dos solo si el JSON trae portafolio), 'Carry trade y mercado de dinero', 'Licitación y agenda' y 'Riesgos'. En 'Obligaciones negociables' resumí cómo se movieron las ONs más operadas (precio, TIR y su diferencia contra los "
           "soberanos) nombrando las empresas, y si está ons_grandes_emisores, la TIR y el spread contra los Globales de los grandes emisores. "
+          "En 'Tu portafolio' contá cuánto ganó o perdió la cartera en la semana (retorno y monto aproximado, en su moneda), cómo se "
+          "movieron los precios de sus bonos y qué bonos y grupos explicaron el resultado (aportes), con el mejor y el peor. En "
+          "'Indicadores de tu portafolio' explicá en palabras simples, como a alguien que recién empieza, qué mide cada indicador con su "
+          "número (duración modificada, DV01, convexidad, plazo promedio, tipo de cartera, mayor exposición y VaR) y cómo se comportaron "
+          "en la semana: cuánto cambiaron en promedio las tasas de sus bonos y cuánto del resultado explica la duración "
+          "(efecto_de_la_duracion_pp) frente al resto (devengamiento, cupones y tipo de cambio). Estos dos párrafos pueden ser más largos. "
           "En 'Carry trade y mercado de dinero' usá carry_trade (dólar de equilibrio de las letras contra el techo de la banda y cuánto se "
           "gana o pierde en dólares si el dólar no se mueve, con el futuro de A3 o en el techo) y mercado_de_dinero (caución, plazo fijo, "
           "billeteras y fondos money market contra la TEA de la LECAP más corta). En 'Licitación y agenda' contá la licitación de la semana "
           "y lo que viene en agenda_proximos_dias: la próxima licitación, pagos y vencimientos del Tesoro y de los soberanos, y qué ONs "
-          "pagan, de qué empresa y qué día (nombrá las principales, no todas, y aclará que esas fechas son estimadas). Si hay "
-          "alertas_activas, mencionalas en 'Riesgos'. Si un dato falta, omitilo. Sin markdown, sin viñetas, sin tablas. El último párrafo "
+          "pagan, de qué empresa y qué día (nombrá las principales, no todas, y aclará que esas fechas son estimadas). Si un dato falta, omitilo. Sin markdown, sin viñetas, sin tablas. El último párrafo "
           "aclara que no es recomendación de inversión.")
 
 
@@ -362,7 +461,7 @@ def redactar(ctx, modelo="claude-sonnet-5-5"):
             import anthropic
             msj = anthropic.Anthropic(api_key=clave).messages.create(
                 model=modelo, max_tokens=4000, system=PROMPT,
-                messages=[{"role": "user", "content": "Datos de la semana (JSON):\n" + json.dumps(ctx, ensure_ascii=False)}])
+                messages=[{"role": "user", "content": "Datos de la semana (JSON):\n" + json.dumps(_para_llm(ctx), ensure_ascii=False)}])
             texto = texto_de(msj)
             if not texto:
                 raise RuntimeError(f"respuesta sin texto (stop_reason={getattr(msj, 'stop_reason', '?')})")
@@ -457,6 +556,43 @@ def plantilla(c):
     if I.get("tamar"):
         t += f" La TAMAR quedó en {_n(I['tamar']['fin'])}% TNA."
     p.append(t)
+    pf = c.get("portafolio")
+    if pf:
+        m_ = pf["moneda"]
+        t = "Tu portafolio: "
+        if pf["retorno_semana_%"] is not None:
+            r_ = pf["retorno_semana_%"]
+            t += (f"en la semana la cartera {'ganó' if r_ >= 0 else 'perdió'} {_n(abs(r_))}%"
+                  + (f", unos {m_} {_n(abs(pf['resultado_aprox']), 0)}" if pf.get("resultado_aprox") is not None else "")
+                  + f" sobre un valor de hoy de {m_} {_n(pf['valor_hoy'], 0)} ({pf['bonos']} bonos). ")
+        g_ = sorted(pf["por_grupo"].items(), key=lambda kv: -(kv[1]["peso_%"] or 0))
+        if g_:
+            t += "Por grupo: " + "; ".join(f"{k} ({_n(v['peso_%'], 0)}% de la cartera) {_s(v['retorno_%'])}%" for k, v in g_ if v["retorno_%"] is not None) + ". "
+        mov = [b for b in pf["bonos_detalle"] if b["var_precio_%"] is not None][:5]
+        if mov:
+            t += "Precios: " + "; ".join(f"{b['ticker']} de {_n(b['precio_ini'])} a {_n(b['precio_fin'])} ({_s(b['var_precio_%'])}%)" for b in mov) + ". "
+        if pf.get("mejor_bono") and pf.get("peor_bono") and pf["mejor_bono"][0] != pf["peor_bono"][0]:
+            t += (f"El que más ayudó fue {pf['mejor_bono'][0]} ({_s(pf['mejor_bono'][1])}%) y el que menos, "
+                  f"{pf['peor_bono'][0]} ({_s(pf['peor_bono'][1])}%).")
+        p.append(t.strip())
+        ix, ts = pf["indicadores"], pf["tasas_en_la_semana"]
+        t = (f"Indicadores de tu portafolio: la duración modificada es {_n(ix['duracion_modificada'])}: si todas las tasas subieran 1 punto "
+             f"porcentual, la cartera perdería cerca de {_n(ix['duracion_modificada'])}% de su valor. El DV01 dice lo mismo en plata: "
+             f"{m_} {_n(ix['dv01'], 0)} por cada punto básico (0,01%) que suban las tasas. La convexidad ({_n(ix['convexidad'], 1)}) mide la "
+             f"curvatura: con tasas en baja ganás un poco más y con tasas en suba perdés un poco menos de lo que dice la duración. El plazo "
+             f"promedio es de {_n(ix['plazo_promedio_anios'])} años y es una cartera {ix['tipo_de_cartera'][0].lower()}: "
+             f"{ix['tipo_de_cartera'][1]} La mayor exposición es {ix['mayor_exposicion'][0]} ({_n(ix['mayor_exposicion'][1], 0)}% del valor), "
+             f"equivalente a {_n(ix['bonos_efectivos'], 1)} bonos de igual peso. ")
+        if ix.get("riesgo"):
+            rg = ix["riesgo"]
+            t += (f"Con la historia de {rg['ruedas']} ruedas, el VaR al 95% a un día es de {m_} {_n(rg['var_95_1_dia'], 0)} "
+                  f"({_n(rg['var_%'])}% del valor): solo 1 de cada 20 días se perdió más que eso; la volatilidad anual es {_n(rg['volatilidad_anual_%'], 1)}%. ")
+        if ts["cambio_promedio_pb"] is not None:
+            t += (f"En la semana, las tasas de tus bonos se movieron {_s(ts['cambio_promedio_pb'], 0)} pb en promedio "
+                  f"({'bajaron, y eso sube los precios' if ts['cambio_promedio_pb'] < 0 else 'subieron, y eso baja los precios'}): con tu duración, "
+                  f"ese movimiento explica {_s(ts['efecto_de_la_duracion_pp'])} puntos del resultado")
+            t += (f" y el resto ({_s(ts['resto_pp'])} puntos) es devengamiento, cupones y tipo de cambio." if ts.get("resto_pp") is not None else ".")
+        p.append(t.strip())
     ct, md = c.get("carry_trade"), c.get("mercado_de_dinero")
     if ct or md:
         t = "Carry trade y mercado de dinero: "
@@ -511,9 +647,7 @@ def plantilla(c):
                       f"renta de US$ {_n(x['renta_usd_por_100'], 3)}") + " por 100 VN" for x in po[:6])
                   + (f", y {len(po) - 6} pagos más en la tabla" if len(po) > 6 else "") + ".")
     p.append(t)
-    al_ = c.get("alertas_activas")
-    p.append("Riesgos: " + (("alertas activas: " + "; ".join(al_) + ". ") if al_ else "") +
-             "los precios de una semana pueden cambiar rápido con el dólar, la inflación o noticias fiscales; las tasas implícitas incluyen "
+    p.append("Riesgos: los precios de una semana pueden cambiar rápido con el dólar, la inflación o noticias fiscales; las tasas implícitas incluyen "
              "primas por plazo y por riesgo, así que no son pronósticos, y la banda cambiaria puede cambiar. Herramienta académica: no constituye "
              "recomendación de inversión.")
     return "\n\n".join(p)
@@ -666,6 +800,67 @@ def pdf(S, texto, origen="", ctx=None):
                 bloque += [Spacer(1, 4), tt, Paragraph(_limpio("TIREA = (pago final / precio)^(365 / días) - 1, con el pago final de cada instrumento: "
                                                                "VNO x (1 + TEM de emisión)^(meses 30/360). Se omiten las que vencen en menos de 15 días."), chico)]
             hist.append(KeepTogether(bloque))
+    celda = ParagraphStyle("cel", parent=est["Normal"], fontSize=7.4, leading=9)
+    estilo_t = lambda f=7.8: TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", f), ("FONT", (0, 1), (-1, -1), "Helvetica", f),
+                                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#141A2E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                                         ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F1EC")]),
+                                         ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)])
+    # tu portafolio
+    ctx = ctx or S.get("contexto", {})
+    pf = ctx.get("portafolio")
+    if pf:
+        celda_p = ParagraphStyle("celp", parent=est["Normal"], fontSize=7.6, leading=9.2)
+        m_ = pf["moneda"]
+        ix, ts = pf["indicadores"], pf["tasas_en_la_semana"]
+        filas = [["Indicador", "Valor", "Qué quiere decir"]]
+        agregar = lambda nom, val, txt: filas.append([Paragraph(_limpio(nom), celda_p), Paragraph(_limpio(val), celda_p), Paragraph(_limpio(txt), celda_p)])
+        agregar("Retorno de la semana", "" if pf["retorno_semana_%"] is None else f"{_s(pf['retorno_semana_%'])}%"
+                + (f" ({m_} {_n(pf['resultado_aprox'], 0)})" if pf.get("resultado_aprox") is not None else ""),
+                f"Del {ini:%d/%m} al {fin:%d/%m}, con los cupones cobrados y los pesos de hoy de cada bono.")
+        agregar("Valor de la cartera", f"{m_} {_n(pf['valor_hoy'], 0)}", f"{pf['bonos']} bonos a los precios de hoy.")
+        agregar("Duración modificada", _n(ix["duracion_modificada"]), "Cuánto % pierde la cartera si todas las tasas suben 1 punto porcentual.")
+        agregar("DV01", f"{m_} {_n(ix['dv01'], 0)}", "Lo mismo en plata: cuánto pierde si las tasas suben 1 punto básico (0,01%).")
+        agregar("Convexidad", _n(ix["convexidad"], 1), "Curvatura precio-tasa: con más convexidad, ganás más si las tasas bajan y perdés menos si suben.")
+        agregar("Plazo promedio", f"{_n(ix['plazo_promedio_anios'])} años", "Hasta el vencimiento, ponderado por valor.")
+        agregar("Tipo de cartera", ix["tipo_de_cartera"][0], ix["tipo_de_cartera"][1])
+        agregar("Mayor exposición", f"{ix['mayor_exposicion'][0]} ({_n(ix['mayor_exposicion'][1], 0)}%)",
+                f"Equivale a {_n(ix['bonos_efectivos'], 1)} bonos de igual peso (cuanto más, más diversificada).")
+        if ix.get("riesgo"):
+            rg = ix["riesgo"]
+            agregar("VaR 95% a 1 día", f"{m_} {_n(rg['var_95_1_dia'], 0)} ({_n(rg['var_%'])}%)",
+                    f"Solo 1 de cada 20 días se perdió más que esto ({rg['ruedas']} ruedas). Volatilidad anual: {_n(rg['volatilidad_anual_%'], 1)}%.")
+        if ts["cambio_promedio_pb"] is not None:
+            agregar("Tasas en la semana", f"{_s(ts['cambio_promedio_pb'], 0)} pb",
+                    f"Cambio promedio de la tasa de tus bonos ({_n(ts['peso_con_dato_%'], 0)}% de la cartera con dato). Efecto de la duración: "
+                    f"{_s(ts['efecto_de_la_duracion_pp'])} puntos; resto (devengamiento, cupones, dólar): "
+                    + ("" if ts.get("resto_pp") is None else f"{_s(ts['resto_pp'])} puntos."))
+        t = Table(filas, colWidths=[3.4 * cm, 3.6 * cm, 9.8 * cm], repeatRows=1)
+        t.setStyle(estilo_t()); t.setStyle(TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8)]))
+        bloque = [Paragraph("Tu portafolio en la semana", h2), t]
+        filas = [["Bono", "Grupo", "Peso", f"Precio {ini:%d/%m}", f"Precio {fin:%d/%m}", "Var. precio", "Retorno", "Aporte", "Tasa (pb)"]]
+        for b_ in pf["bonos_detalle"][:18]:
+            filas.append([b_["ticker"], Paragraph(_limpio(b_["grupo"]), celda_p), f"{_n(b_['peso_%'], 1)}%",
+                          "" if b_["precio_ini"] is None else _n(b_["precio_ini"]), "" if b_["precio_fin"] is None else _n(b_["precio_fin"]),
+                          "" if b_["var_precio_%"] is None else f"{_s(b_['var_precio_%'])}%", "" if b_["retorno_semana_%"] is None else f"{_s(b_['retorno_semana_%'])}%",
+                          "" if b_["aporte_pp"] is None else f"{_s(b_['aporte_pp'])} pp", "" if b_["cambio_tasa_pb"] is None else _s(b_["cambio_tasa_pb"], 0)])
+        t2 = Table(filas, colWidths=[1.5 * cm, 3.2 * cm, 1.4 * cm, 1.9 * cm, 1.9 * cm, 1.8 * cm, 1.7 * cm, 1.7 * cm, 1.7 * cm], repeatRows=1)
+        t2.setStyle(estilo_t()); t2.setStyle(TableStyle([("ALIGN", (2, 0), (-1, -1), "RIGHT")]))
+        hist += [KeepTogether(bloque), Spacer(1, 6), t2,
+                 Paragraph(_limpio("Precio en la moneda en que cotiza cada bono. Retorno: en la moneda de la cartera, con cupones y tipo de cambio. "
+                                   "Aporte = peso x retorno (la suma da el retorno de la cartera). Tasa: cambio de la TIR (o TIREA) del bono en la semana."), chico)]
+        if len(pf.get("_serie", [])) > 5:
+            sx = pd.Series({pd.Timestamp(d): v for d, v in pf["_serie"]})
+            fig, ax = plt.subplots(figsize=(7.4, 2.5))
+            ax.plot(sx.index, sx.values, color=AZUL, lw=1.8)
+            ax.axvspan(pd.Timestamp(pf["_ini"]), pd.Timestamp(pf["_fin"]), color=VIOLETA, alpha=.12, label="Semana del informe")
+            ax.axhline(100, color=GRIS, lw=.8, ls="--")
+            import matplotlib.dates as mdates
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+            ax.set_ylabel("Base 100"); ax.grid(alpha=.25); ax.legend(fontsize=7, loc="upper left")
+            ax.set_title("Valor de tu cartera en los últimos tres meses (con los pesos de hoy)", fontsize=9)
+            fig.tight_layout()
+            img = Image(_png(fig)); w = 16.5 * cm; img.drawHeight = w * img.imageHeight / img.imageWidth; img.drawWidth = w
+            hist += [Spacer(1, 4), img]
     # obligaciones negociables
     TO = S.get("ons")
     if TO is not None and len(TO):
@@ -704,12 +899,6 @@ def pdf(S, texto, origen="", ctx=None):
                                ("ALIGN", (2, 0), (-1, -1), "RIGHT")]))
         hist += [KeepTogether([Paragraph(_limpio(f"Licitación del {lic['fecha']}: adjudicó $ {_n(lic['adjudicado_billones'])} billones de "
                                                  f"$ {_n(lic['ofertado_billones'])} ofertados"), h2), t])]
-    ctx = ctx or S.get("contexto", {})
-    celda = ParagraphStyle("cel", parent=est["Normal"], fontSize=7.4, leading=9)
-    estilo_t = lambda f=7.8: TableStyle([("FONT", (0, 0), (-1, 0), "Helvetica-Bold", f), ("FONT", (0, 1), (-1, -1), "Helvetica", f),
-                                         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#141A2E")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                                         ("VALIGN", (0, 0), (-1, -1), "TOP"), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F1EC")]),
-                                         ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)])
     pct = lambda v, d=1: "" if v is None else f"{_s(v, d)}%"
     # carry trade con la banda
     ct = ctx.get("carry_trade")

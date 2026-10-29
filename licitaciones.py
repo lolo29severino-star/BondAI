@@ -1,12 +1,11 @@
 """
-licitaciones.py — licitaciones del Tesoro (premio contra el mercado secundario) y calendario de licitaciones, cortes de cupón
-y vencimientos para la pestaña «Licitaciones» de la app BondAI.
+licitaciones.py — licitaciones del Tesoro (premio contra el mercado secundario) y calendario de licitaciones, pagos y
+vencimientos. Los usa el informe semanal: la licitación de la semana y la agenda de las dos semanas siguientes.
 
 Uso desde la app:
     import licitaciones as L
     sub, col, prox, info = L.actualizar(en_vivo, cer, tamar, a3500)   # respaldo + licitaciones nuevas leídas solas de Finanzas
     ev = L.eventos(date(2026, 10, 1), date(2027, 3, 31))                # calendario: licitaciones, cortes, rentas, amortizaciones, feriados
-    html = L.mes_html(ev, 2026, 10, hoy=date(2026, 10, 20))             # grilla del mes para mostrar con st.markdown
 
 Actualización automática: en vivo, actualizar() lee la página de noticias de la Secretaría de Finanzas
 (argentina.gob.ar/economia/finanzas/noticias), abre cada «Resultado de la licitación» posterior al respaldo, lee sus tablas
@@ -19,7 +18,6 @@ método (el respaldo se armó con data/build_licitaciones.js y se validó contra
 del BCRA. Respaldo con las licitaciones de 2026 hasta la del 14/10/2026.
 """
 import base64
-import calendar
 import html as _html
 import json
 import re
@@ -610,40 +608,3 @@ def agrupar(ev):
     """Junta en una fila los eventos del mismo día, tipo y detalle (por ejemplo, los cortes de cupón de varios bonos)."""
     g = ev.groupby(["fecha", "tipo", "detalle"], sort=False)["ticker"].apply(lambda s: ", ".join(x for x in s if x)).reset_index()
     return g[["fecha", "tipo", "ticker", "detalle"]]
-
-
-COLOR_EV = {"lic": "#2a78d6", "lla": "#8a96aa", "liq": "#8a96aa", "cor": "#b7791f", "ren": "#1baf7a", "amo": "#4a3aa7", "ven": "#eb6834", "fer": "#8a96aa"}
-
-
-def mes_html(ev, anio, mes, hoy=None):
-    """Grilla de un mes (lunes a domingo) con los eventos de cada día, como tabla HTML para st.markdown(unsafe_allow_html=True)."""
-    cal = calendar.Calendar(firstweekday=0)
-    dias_ev = {}
-    for _, e in ev.iterrows():
-        dias_ev.setdefault(e["fecha"], []).append(e)
-    fer = {e["fecha"] for _, e in ev.iterrows() if e["tipo"] == "fer"}
-    css = ("<style>.calbx{width:100%;border-collapse:collapse;table-layout:fixed;font-size:11.5px}.calbx th{background:rgba(128,128,128,.12);padding:4px;"
-           "font-weight:600}.calbx td{border:1px solid rgba(128,128,128,.25);vertical-align:top;height:86px;padding:3px 4px;overflow:hidden}"
-           ".calbx .n{font-weight:700}.calbx .fuera{opacity:.45}.calbx .hoy .n{background:#2a78d6;color:#fff;border-radius:9px;padding:0 6px}"
-           ".calbx .fer{background:repeating-linear-gradient(135deg,transparent 0 6px,rgba(128,128,128,.12) 6px 12px)}"
-           ".calbx .ev{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:3px solid;padding-left:4px;margin-top:2px}</style>")
-    h = css + '<table class="calbx"><tr>' + "".join(f"<th>{d}</th>" for d in ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]) + "</tr>"
-    for semana in cal.monthdatescalendar(anio, mes):
-        h += "<tr>"
-        for d in semana:
-            es = dias_ev.get(d, [])
-            grupos = {}
-            for e in es:   # las ONs van en su propio renglón, separadas de los soberanos
-                grupos.setdefault((e["tipo"], e["moneda"] == "on"), []).append(e["ticker"])
-            clases = " ".join(c for c, ok in [("fuera", d.month != mes), ("hoy", d == hoy), ("fer", d in fer)] if ok)
-            chips = ""
-            for tipo, on in [(t, o) for t in ["lic", "lla", "liq", "fer", "ven", "amo", "ren", "cor"] for o in (False, True)]:
-                if (tipo, on) in grupos:
-                    tk = [t for t in grupos[(tipo, on)] if t]
-                    nom = TIPOS_EV[tipo] + (" ON" if on else "")
-                    txt = nom + (" " + " ".join(tk[:3]) + (f" +{len(tk) - 3}" if len(tk) > 3 else "") if tk else "")
-                    estilo = f"border-color:{COLOR_EV[tipo]}" + (";border-left-style:dotted" if on else "")
-                    chips += f'<span class="ev" style="{estilo}" title="{nom}: {", ".join(tk)}">{txt}</span>'
-            h += f'<td class="{clases}"><span class="n">{d.day}</span>{chips}</td>'
-        h += "</tr>"
-    return h + "</table>"

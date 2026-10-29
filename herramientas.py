@@ -1,12 +1,13 @@
 """
-herramientas.py — seis herramientas de BondAI que se apoyan en los cálculos de los otros módulos.
+herramientas.py — cinco herramientas de BondAI que se apoyan en los cálculos de los otros módulos.
 
   1. Fichas de las ONs de los grandes emisores y su curva contra la de los soberanos   → spread_ons, EMISORES_TOP
   2. Retorno de los bonos en dólares hasta una fecha según la TIR a la que se venda      → retorno_hasta, tabla_retornos
   3. Carry trade con bandas: rendimiento en dólares de una LECAP según el dólar final   → banda, tabla_carry, curva_carry
   4. Mercado de dinero: caución, plazo fijo, billeteras y fondos money market            → cargar_dinero, resumen_dinero
   5. Tu cartera contra un índice de bonos                                                → comparar_indice
-  6. Alertas (riesgo país, variación de un bono, dólar, brecha, TIR de un bono)          → REGLAS, evaluar_alertas
+
+La 1 se usa en la pestaña «ONs», la 2 en «Curva en dólares», la 5 en «Mi portafolio» y la 3 y la 4 en el informe semanal.
 
 Fuentes en vivo: BYMA Open Data (cauciones), ArgentinaDatos (plazo fijo, cuentas remuneradas y fondos money market).
 Si no responden, se usa el respaldo del 20/10/2026 que está en este archivo.
@@ -315,35 +316,3 @@ def comparar_indice(rc, ri):
     st["beta"], st["corr"] = beta, float(df.corr().iloc[0, 1])
     st["ruedas"], st["desde"], st["hasta"] = len(df), df.index[0], df.index[-1]
     return acum, st
-
-
-# ───────────────────────────── 6. alertas ─────────────────────────────
-REGLAS = {"rp": ("Riesgo país por encima de (pb)", 650.0), "var": ("Un bono se mueve en el día más de (%)", 3.0),
-          "mep": ("Dólar MEP por encima de ($)", 1600.0), "brecha": ("Brecha MEP vs oficial por encima de (%)", 5.0)}
-
-
-def _mil(v, d=0):
-    """Número con punto de miles y coma decimal: 1.234,56."""
-    return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def evaluar_alertas(reglas, riesgo=None, variaciones=None, mep=None, a3500=None, tir_bono=None):
-    """Devuelve una lista de (gravedad, texto) con las reglas que se cumplen. reglas: {clave: umbral o None};
-    variaciones: {ticker: variación diaria}; tir_bono: (ticker, 'sube'|'baja', umbral %, TIR actual) o None."""
-    out = []
-    if reglas.get("rp") and riesgo is not None and len(riesgo) and float(riesgo.iloc[-1]) > reglas["rp"]:
-        out.append(("error", f"Riesgo país en {_mil(float(riesgo.iloc[-1]))} pb, arriba de {_mil(reglas['rp'])} pb (al {riesgo.index[-1]:%d/%m})."))
-    if reglas.get("var") and variaciones:
-        mov = {t: v for t, v in variaciones.items() if v is not None and np.isfinite(v) and abs(v) * 100 > reglas["var"]}
-        if mov:
-            txt = ", ".join(f"{t} {_mil(v * 100, 1) if v < 0 else '+' + _mil(v * 100, 1)}%" for t, v in sorted(mov.items(), key=lambda kv: -abs(kv[1]))[:8])
-            out.append(("warning", f"{len(mov)} bono(s) se movieron más de {_mil(reglas['var'], 1)}% hoy: {txt}."))
-    if reglas.get("mep") and mep and np.isfinite(mep) and mep > reglas["mep"]:
-        out.append(("warning", f"Dólar MEP en $ {_mil(mep, 2)}, arriba de $ {_mil(reglas['mep'])}."))
-    if reglas.get("brecha") and mep and a3500 and np.isfinite(mep) and np.isfinite(a3500) and (mep / a3500 - 1) * 100 > reglas["brecha"]:
-        out.append(("warning", f"Brecha MEP vs oficial en {_mil((mep / a3500 - 1) * 100, 1)}%, arriba de {_mil(reglas['brecha'], 1)}%."))
-    if tir_bono and tir_bono[3] is not None and np.isfinite(tir_bono[3]):
-        t, sentido, umbral, tir = tir_bono
-        if (sentido == "sube" and tir * 100 > umbral) or (sentido == "baja" and tir * 100 < umbral):
-            out.append(("info", f"La TIR de {t} está en {_mil(tir * 100, 2)}%, {'arriba' if sentido == 'sube' else 'debajo'} de {_mil(umbral, 2)}%."))
-    return out

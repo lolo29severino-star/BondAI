@@ -105,22 +105,6 @@ def futuro_en(df, spot, dias):
     return float(np.exp(np.interp(dias, xs, ys)))
 
 
-def techo_proyectado(fecha, techo_banda, ipc):
-    """Techo de la banda cambiaria a una fecha: después del último dato publicado crece cada mes con la inflación de dos meses
-    antes (ipc: 'AAAA-MM' -> decimal; IPC publicado, después REM)."""
-    f1 = date(2026, 10, 31)
-    if fecha <= f1:
-        return techo_banda(fecha)
-    v, f = techo_banda(f1), f1
-    while True:
-        fin = ultimo_dia(f + timedelta(days=1))
-        m = str(pd.Period(fin, "M") - 2)
-        crec = 1 + ipc(m)
-        if fecha <= fin:
-            return v * crec ** ((fecha - f).days / (fin - f).days)
-        v, f = v * crec, fin
-
-
 def ultimo_dia(f):
     return date(f.year + (f.month == 12), f.month % 12 + 1, 1) - timedelta(days=1)
 
