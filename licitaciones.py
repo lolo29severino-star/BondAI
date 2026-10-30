@@ -184,8 +184,12 @@ def _identificar(nombre, hd, liq, corte):
         x = next((x for x in P.FIJA if x[0] == t or (t is None and date.fromisoformat(x[3]) == venc)), None)
         if x:
             t, meta["em"], meta["tem"] = x[0], date.fromisoformat(x[2]), x[4]
-        elif "%" in corte:
-            meta["em"], meta["tem"] = liq, _num(corte) / 100
+        else:
+            tem_txt = re.search(r"TEM\D{0,20}?(\d+,\d+)\s*%", N)        # algunos comunicados traen la TEM en el nombre
+            if tem_txt:
+                meta["em"], meta["tem"] = liq, _num(tem_txt.group(1)) / 100
+            elif "%" in corte:
+                meta["em"], meta["tem"] = liq, _num(corte) / 100
     elif fam == "cer":
         x = next((x for x in P.CERZ if x[0] == t or (t is None and date.fromisoformat(x[3]) == venc)), None)
         meta["fb"] = date.fromisoformat(x[4]) if x else P.restar_habiles(liq, 10)
@@ -448,6 +452,67 @@ def listar_noticias(h):
     for href, f, tit in re.findall(r'<a href="(/noticias/[^"]+)"[^>]*>.*?<time datetime="(\d{4}-\d{2}-\d{2})[^"]*">.*?<h3>(.*?)</h3>', h, re.S):
         out.append((date.fromisoformat(f), GOB + href, _html.unescape(re.sub(r"<[^>]+>", "", tit)).strip()))
     return out
+
+
+def _condiciones_nuevo(meta, nombre, liq, corte, f):
+    """Condiciones de un bono que pesos.py todavía no conoce, para que se agregue solo (pesos.registrar_nuevos). Solo las familias
+    que se valúan con datos del comunicado: LECAP/BONCAP (TEM de emisión), CER cero cupón (CER base), TAMAR y dólar linked.
+    Devuelve None si faltan datos (por ejemplo, un BONTE o un CER con cupones, o un dual)."""
+    N, t, v = nombre.upper(), meta.get("t"), meta.get("venc")
+    if not t or not v:
+        return None
+    base = {"fam": meta["fam"], "t": t, "venc": v.isoformat(), "em": liq.isoformat(), "licitacion": f.isoformat(),
+            "ticker_estimado": bool(meta.get("ticker_estimado")), "nombre": nombre[:160]}
+    if meta["fam"] == "fija" and meta.get("tem"):
+        return {**base, "em": (meta.get("em") or liq).isoformat(), "tem": round(float(meta["tem"]), 6)}
+    if meta["fam"] == "cer" and re.search(r"LETRA|CERO CUP|DESCUENTO", N):
+        return {**base, "fb": (meta.get("fb") or P.restar_habiles(liq, 10)).isoformat()}
+    if meta["fam"] == "tamar" and not re.search(r"DUAL", N):
+        return {**base, "m": float(_num(corte)) if "%" in str(corte) else None}
+    if meta["fam"] == "dl" and not re.search(r"DUAL", N):
+        return base
+    return None
+
+
+def nuevos_de_resultado(h, f):
+    """Comunicado «Resultado de la licitación» → condiciones de los bonos que todavía no están en pesos.py."""
+    _, crudas = leer_resultado(h, f)
+    liq = f
+    for _ in range(2):
+        liq = P.siguiente_habil(liq)
+    out, vistos = [], set()
+    for hd, c in crudas:
+        if len(c) < 5:
+            continue
+        meta = _identificar(c[0], hd, liq, c[4])
+        if not meta.get("venc") or not meta.get("t") or meta["t"] in P.TICKERS or meta["t"] in vistos:
+            continue
+        cond = _condiciones_nuevo(meta, c[0], liq, c[4], f)
+        if cond:
+            out.append(cond); vistos.add(meta["t"])
+    return out
+
+
+def instrumentos_nuevos(usar_api=True, desde=None):
+    """Bonos en pesos que el Tesoro emitió en licitaciones posteriores al respaldo (o a 'desde') y que pesos.py todavía no
+    conoce. Lee los «Resultado de la licitación» de la Secretaría de Finanzas; no baja precios, así que es rápido. Sin internet,
+    o si algo falla, devuelve una lista vacía y la app sigue con los bonos que ya conoce."""
+    if not usar_api:
+        return []
+    try:
+        import requests
+        ses = requests.Session()
+        ses.headers["User-Agent"] = "Mozilla/5.0 (Bond Analytics, trabajo práctico UCA)"
+        lista = listar_noticias(ses.get(LISTADO, timeout=(4, 10)).text)
+        ult = desde or max(date.fromisoformat(x["f"]) for x in RESPALDO["licitaciones"]["subastas"])
+        out, vistos = [], set()
+        for f, url, tit in sorted(x for x in lista if es_resultado(x[2]) and x[0] > ult):
+            for c in nuevos_de_resultado(ses.get(url, timeout=(4, 10)).text, f):
+                if c["t"] not in vistos:
+                    out.append(c); vistos.add(c["t"])
+        return out
+    except Exception:
+        return []
 
 
 es_resultado = lambda t: re.match(r"Resultado de (la )?licitaci", t, re.I) is not None and not re.search(r"conversi|segunda vuelta|canje", t, re.I)

@@ -227,8 +227,10 @@ GUIA = {
                                    "parece más seguro prestarle a esa empresa que al Estado."),
         ("Valor técnico y paridad técnica", "lo que la ON debe hoy (capital pendiente + intereses acumulados) y el precio como porcentaje de eso."),
     ]},
-    "pesos": {"intro": "**Bonos del Tesoro en pesos.** Hay seis tipos según cómo pagan. La idea es comparar todos contra los de **tasa fija**: así ves cuál "
-                       "conviene según lo que esperes de la inflación, las tasas o el dólar.",
+    "pesos": {"intro": "**Bonos del Tesoro en pesos.** Están agrupados según cómo pagan: tasa fija (LECAP, BONCAP y BONTE, que juntas forman la "
+                       "curva en pesos), CER, TAMAR, duales y dólar linked. La idea es comparar todos contra los de **tasa fija**: así ves cuál "
+                       "conviene según lo que esperes de la inflación, las tasas o el dólar. Los bonos que el Tesoro emite en cada licitación se "
+                       "agregan solos.",
               "terminos": [
         ("LECAP, BONCAP y BONTE", "letras y bonos a tasa fija: hoy ya sabés cuántos pesos vas a cobrar al vencimiento."),
         ("CER", "bonos cuyo capital se ajusta por inflación (el CER sigue al IPC con un pequeño atraso). Te protegen si la inflación sube."),
@@ -330,6 +332,15 @@ if st.sidebar.toggle("Actualizar sola cada 15 minutos", value=False, disabled=no
     with st.sidebar:
         reloj()
 D = cargar(en_vivo)
+
+
+@st.cache_data(ttl=3 * 3600, show_spinner="Buscando bonos nuevos del Tesoro en las licitaciones…")
+def nuevos_tesoro(en_vivo):
+    """Bonos en pesos que el Tesoro emitió después del respaldo, con sus condiciones (resultados de las licitaciones)."""
+    return L.instrumentos_nuevos(en_vivo)
+
+
+P.registrar_nuevos(nuevos_tesoro(en_vivo))   # LECAP, BONCAP, CER, TAMAR y dólar linked nuevos se agregan solos
 st.sidebar.markdown("**Fuentes usadas**")
 for k, v in D["fuente"].items():
     st.sidebar.write(f"· {k}: {v}")
@@ -364,6 +375,8 @@ ON_OK = X.ons_calculables(TO, FICH, liq_usd, moneda)   # ONs en dólares con tas
 ONS_EV = tuple((t, r["emisor"], r["clase"], tuple(r["flujos"]), r["vence"], bool(r["frec_supuesta"])) for t, r in ON_OK.iterrows()) if len(ON_OK) else ()
 for k, v in [("futuros de dólar (A3)", F_FUT), ("riesgo país", F_RIESGO), ("ONs", F_ONS)]:
     st.sidebar.write(f"· {k}: {v}")
+if P.NUEVOS:
+    st.sidebar.write(f"· bonos nuevos del Tesoro (licitaciones): {', '.join(P.NUEVOS)}")
 st.sidebar.caption(f"Fecha de análisis: {D['fecha']:%d/%m/%Y} · datos bajados a las {D['bajado']:%H:%M} (hora argentina)")
 st.sidebar.caption("Herramienta académica. No es recomendación de inversión.")
 
@@ -524,6 +537,23 @@ def grafico_be(df, max_cero):
         ax.fill_between(g, (fit[0](g) - fit[2]) * 100, (fit[0](g) + fit[2]) * 100, color=AZUL, alpha=.12, lw=0)
     ax.plot(d["plazo_be"], d["rem_mensual"] * 100, ls="--", color=VIOLETA, lw=1.3, label="REM para los mismos meses")
     ax.set_xlabel("Plazo (días)"); ax.set_ylabel("Inflación breakeven mensual %"); ax.legend(fontsize=8); ax.grid(alpha=.25)
+    fig.tight_layout()
+    return fig
+
+
+def grafico_fija(df, curva):
+    """Curva de tasa fija en pesos: TIREA contra duración de LECAP (círculos), BONCAP (cuadrados) y BONTE (triángulos), con la curva ajustada."""
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    d = df[df["dias"] >= 7]
+    for tipo, mk, col in (("LECAP", "o", AZUL), ("BONCAP", "s", VIOLETA), ("BONTE", "^", "#1baf7a")):
+        x = d[d["tipo"] == tipo]
+        if len(x):
+            ax.scatter(x["x"], x["tirea"] * 100, marker=mk, color=col, s=42, zorder=3, label=tipo)
+            etiquetar(ax, x["x"], x["tirea"] * 100, x.index)
+    if len(d):
+        g = np.linspace(max(0.03, d["x"].min() * 0.8), d["x"].max() * 1.04, 100)
+        ax.plot(g, [curva(v) * 100 for v in g], color=GRIS, lw=1.5, label="Curva de tasa fija")
+    ax.set_xlabel("Duración (años)"); ax.set_ylabel("TIREA %"); ax.grid(alpha=.25); ax.legend(fontsize=8, loc="lower right")
     fig.tight_layout()
     return fig
 
@@ -740,6 +770,10 @@ with tabP:
                   help="El dólar oficial que el mercado de futuros de A3 espera para dentro de seis meses. Con esto se calcula cuánto rinden "
                        "en pesos los dólar linked.")
 
+    nuevos_rp = [(t, k) for k, _, _ in P.TIPOS if len(RP[k]) for t in RP[k].index if t in P.NUEVOS]
+    if nuevos_rp:
+        st.caption("Bonos nuevos que se agregaron solos, con las condiciones del resultado de su licitación: " + " · ".join(
+            f"{t} ({RP[k].loc[t, 'tipo']}, licitación del {date.fromisoformat(P.NUEVOS[t]['licitacion']):%d/%m/%Y})" for t, k in nuevos_rp))
     alias = [f"{t}→{r['precio_de']}" for k, _, _ in P.TIPOS if len(RP[k]) for t, r in RP[k].iterrows() if r["precio_de"] != t]
     if alias:
         st.caption("El ticker base no operó; precio tomado del alias con el mismo ISIN: " + ", ".join(alias))
@@ -747,10 +781,11 @@ with tabP:
     COM = {"vence": "{:%d/%m/%Y}", "dias": "{:.0f}", "precio": "{:,.2f}", "var": "{:+.2%}", "vol": "{:,.0f}", "md": "{:.2f}", "spread_pb": "{:+.0f}"}
     NOM = {"vence": "Vence", "dias": "Días", "precio": "Precio", "var": "Var.", "vol": "Vol. $M", "md": "MD", "spread_pb": "Spread (pb)"}
     NOTAS = {
-        "lecap": "Pago final = 100 × (1 + TEM de emisión)^(meses 30/360 desde la emisión). TIREA = (pago / precio)^(365/días) − 1. La curva de tasa fija es un Nelson-Siegel sobre LECAP y BONCAP con más de 15 días; el spread compara cada bono con esa curva.",
-        "boncap": "BONCAP: cupón cero capitalizable, igual que las LECAP. BONTE (TO26, TY30P): tasa fija con cupones semestrales, valuados por flujos.",
+        "fija": "LECAP y BONCAP: pago final = 100 × (1 + TEM de emisión)^(meses 30/360 desde la emisión) y TIREA = (pago / precio)^(365/días) − 1. "
+                "BONTE (TO26, TY30P): tasa fija con cupones semestrales, valuados por flujos. La curva de tasa fija es un Nelson-Siegel de la TIREA "
+                "contra la duración de todos ellos (más de 15 días); el spread compara cada bono con esa curva.",
         "cer": "Valor técnico = 100 × CER de 10 hábiles antes de la liquidación / CER base (10 hábiles antes de la emisión). Inflación BE: se toma tal cual el CER que el BCRA ya publicó y se busca la inflación mensual pareja de los meses todavía no publicados que hace que el bono pague lo mismo que la curva de tasa fija (ajustada a LECAP y BONCAP, mejor ajuste) a su plazo (n/a: el CER hasta el vencimiento ya está publicado; —: vence después de la letra a tasa fija más larga). REM: promedio mensual del sendero del REM para esos mismos meses. TNA 30/365 = ((1 + TIR)^(30/365) − 1) × 365/30; la nominal usa el sendero IPC publicado → REM → supuesto. DICP, DIP0, PARP, PAP0 y CUAP son los bonos del canje 2005 (base CER 31/12/2003).",
-        "tamar": "Margen s/ TAMAR: TNA equivalente al rendimiento del bono menos la TAMAR supuesta. Pagan al vencimiento 100 × (1 + TAMAR TEM)^meses, con TAMAR TEM = [(1 + TAMAR × 32/365)^(365/32)]^(1/12) − 1 y la TAMAR promediada en toda la vida del título (desde 10 hábiles antes de la emisión hasta 10 antes del vencimiento), más el margen de la licitación: TMF27 6,50%, TML27 5,40%, TMG27 6,00%, TMF28 6,50% y TMG28 6,90% (comunicados de la Secretaría de Finanzas; TMG27, ficha técnica).",
+        "tamar": "Margen s/ TAMAR: TNA equivalente al rendimiento del bono menos la TAMAR supuesta. Pagan al vencimiento 100 × (1 + TAMAR TEM)^meses, con TAMAR TEM = [(1 + TAMAR × 32/365)^(365/32)]^(1/12) − 1 y la TAMAR promediada en toda la vida del título (desde 10 hábiles antes de la emisión hasta 10 antes del vencimiento), más el margen de la licitación: TMF27 6,50%, TML27 5,40%, TMG27 6,00%, TMF28 6,50% y TMG28 6,90% (comunicados de la Secretaría de Finanzas; TMG27, ficha técnica); los que se agregan solos toman el margen del resultado de su licitación.",
         "dual": "TTD26: máximo entre TEM fija 2,14% y TAMAR. TXM*: máximo entre capital ajustado por CER (proyectado con IPC, REM y la inflación elegida) y TAMAR + 3%. TMVE8: máximo entre USD 100 al A3500 (con el dólar de los futuros de A3 o la devaluación elegida) y el tipo de cambio inicial ($1.499,84) capitalizado a TAMAR. El piso es lo que asegura la otra pata.",
         "dl": "Pagan USD 100 por lámina en pesos, al A3500 de 3 hábiles antes del vencimiento. TIR en dólares = (100 × A3500 de hoy / precio)^(365/días) − 1. "
               "Rinde en pesos (TIREA esperada) = (100 × dólar esperado / precio)^(365/días) − 1, con el dólar esperado de los futuros de A3 (tasa pareja entre "
@@ -758,8 +793,10 @@ with tabP:
               "(1 + TIREA de la curva de tasa fija)^(días/365).",
     }
     EN_POCAS = {
-        "lecap": "letras a tasa fija: hoy ya sabés cuántos pesos cobrás al vencimiento. Mirá la TEM (cuánto ganás por mes) y la TIREA (por año).",
-        "boncap": "como las LECAP pero más largas: bonos a tasa fija. Cuanto más lejos el vencimiento, más se mueve el precio si cambian las tasas.",
+        "fija": "las LECAP (letras, más cortas), las BONCAP (bonos capitalizables, más largos) y los BONTE (bonos con cupón) pagan una tasa "
+                "fija: hoy ya sabés cuántos pesos vas a cobrar. Juntos forman la curva de tasa fija en pesos, la vara contra la que se comparan "
+                "los demás. Mirá la TEM (cuánto ganás por mes) y la TIREA (por año); cuanto más largo el bono, más se mueve su precio si "
+                "cambian las tasas.",
         "cer": "el capital se ajusta por inflación. La TIR real es lo que ganás por encima de la inflación; la «inflación BE» es la inflación con la que "
                "conviene igual que la tasa fija: si esperás más, conviene el CER.",
         "tamar": "pagan la TAMAR (la tasa de los plazos fijos grandes) más un margen. Rinden lo que termine pagando la TAMAR.",
@@ -817,10 +854,14 @@ with tabP:
                 f"un dólar de \\${num_es(e['dolar_esperado'], 0)} ({pc(e['suba_esperada'])} más que hoy), así que por cada \\$100.000 invertidos "
                 f"cobrarías unos \\${num_es(e['cobro_100k'], 0)} el {e['vence']:%d/%m/%Y}: {pc(e['tirea_esperada'])} por año, contra "
                 f"{pc(e['tirea_fija'])} de una tasa fija al mismo plazo.")
-    secciones = st.tabs([f"{nombre} ({len(RP[k])})" for k, nombre, _ in P.TIPOS])
-    for (k, nombre, desc), sec in zip(P.TIPOS, secciones):
+    # LECAP, BONCAP y BONTE van juntas: son la curva de tasa fija en pesos
+    TIPOS_P = [("fija", "Tasa fija: LECAP, BONCAP y BONTE", "Letras y bonos a tasa fija en pesos")] + [x for x in P.TIPOS if x[0] not in ("lecap", "boncap")]
+    RPS = {"fija": pd.concat([x for x in (RP["lecap"], RP["boncap"]) if len(x)]).sort_values("vence") if len(RP["lecap"]) + len(RP["boncap"]) else pd.DataFrame(),
+           **{k: RP[k] for k, _, _ in TIPOS_P[1:]}}
+    secciones = st.tabs([f"{nombre} ({len(RPS[k])})" for k, nombre, _ in TIPOS_P])
+    for (k, nombre, desc), sec in zip(TIPOS_P, secciones):
         with sec:
-            df = RP[k]
+            df = RPS[k]
             st.markdown(f"**En pocas palabras:** {EN_POCAS[k]}")
             if k in ("tamar", "dual", "dl") and not df.empty:
                 with st.container(border=True):
@@ -828,15 +869,18 @@ with tabP:
             st.caption(desc)
             if df.empty:
                 st.info("Sin datos para este tipo de bono."); continue
-            if k in ("lecap", "boncap"):
+            if k == "fija":
                 barato = df[df["dias"] >= 30].sort_values("spread_pb").tail(1)
-                st.markdown(f"Mayor TEM: **{df['tem'].idxmax()}** {df['tem'].max():.2%}" + (f" · Más barato vs la curva: **{barato.index[0]}** {barato['spread_pb'].iloc[0]:+.0f} pb" if len(barato) else ""))
+                cuenta = df["tipo"].value_counts()
+                st.markdown(" · ".join(f"{cuenta.get(x, 0)} {x}" for x in ("LECAP", "BONCAP", "BONTE") if cuenta.get(x, 0)) +
+                            f" · Mayor TEM: **{df['tem'].idxmax()}** {df['tem'].max():.2%}" +
+                            (f" · Más barato vs la curva: **{barato.index[0]}** {barato['spread_pb'].iloc[0]:+.0f} pb" if len(barato) else ""))
                 t = df.copy()
                 t["pago_t"] = ["cupón" if pd.isna(v) else f"{v:,.3f}" for v in t["pago_final"]]
-                mostrar(t[["vence", "dias", "precio", "var", "pago_t", "tna", "tem", "tirea", "md", "spread_pb", "vol"]],
+                mostrar(t[["tipo", "vence", "dias", "precio", "var", "pago_t", "tna", "tem", "tirea", "md", "spread_pb", "vol"]],
                         {**COM, "tna": "{:.2%}", "tem": "{:.2%}", "tirea": "{:.2%}"},
-                        {**NOM, "pago_t": "Pago final", "tna": "TNA", "tem": "TEM", "tirea": "TIREA"}, calor={"var": "var"})
-                ver_grafico(grafico_pesos(df, "tirea", cf, "#2a78d6" if k == "lecap" else "#1baf7a", "TIREA", "Duración (años)"))
+                        {**NOM, "tipo": "Tipo", "pago_t": "Pago final", "tna": "TNA", "tem": "TEM", "tirea": "TIREA"}, calor={"var": "var"})
+                ver_grafico(grafico_fija(df, cf))
             elif k == "cer":
                 c1, c2 = st.columns([1.3, 1])
                 vista_cer = c1.radio("Gráfico", ["TIR real por plazo", "Inflación breakeven mensual vs REM"], horizontal=True)

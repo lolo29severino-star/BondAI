@@ -138,6 +138,33 @@ ALIAS = {"TZXD8": ["T2D8X"], "TXMD8": ["TXD8X"], "TZXD6": ["TXD6X"], "TZXM7": ["
 TICKERS = ([f[0] for f in FIJA] + ["TO26", "TY30P"] + [c[0] for c in CERZ] + [b[0] for b in BONCER] + [x[0] for x in LARGOS] + [t[0] for t in TAMAR]
            + [d["t"] for d in DUALES] + [d[0] for d in DL])
 
+# ── bonos nuevos: se agregan solos a las listas de arriba (los lee licitaciones.instrumentos_nuevos) ──
+NUEVOS = {}   # ticker -> condiciones de los bonos que el Tesoro emitió después del respaldo y que se agregaron solos
+
+
+def registrar_nuevos(lista):
+    """Agrega a FIJA, CERZ, TAMAR y DL (y a TICKERS, para bajar su precio) los bonos nuevos que emitió el Tesoro, con las
+    condiciones leídas del resultado de su licitación. Cada elemento es un dict con fam ('fija', 'cer', 'tamar' o 'dl'), t
+    (ticker), venc y em (fechas ISO) y, según la familia, tem (TEM de emisión), fb (fecha del CER base) o m (margen TAMAR).
+    Es idempotente: un ticker que ya está no se vuelve a agregar. Devuelve los tickers agregados en esta llamada."""
+    agregados = []
+    for x in lista or []:
+        t, fam, v, em = x.get("t"), x.get("fam"), x.get("venc"), x.get("em")
+        if not t or not v or not em or t in TICKERS:
+            continue
+        if fam == "fija" and x.get("tem"):
+            FIJA.append((t, "LECAP" if t.startswith("S") else "BONCAP", em, v, float(x["tem"])))
+        elif fam == "cer" and x.get("fb"):
+            CERZ.append((t, "LECER" if t.startswith("X") else "BONCER", em, v, x["fb"]))
+        elif fam == "tamar":
+            TAMAR.append((t, em, v, x.get("m")))
+        elif fam == "dl":
+            DL.append((t, em, v))
+        else:
+            continue
+        TICKERS.append(t); NUEVOS[t] = dict(x); agregados.append(t)
+    return agregados
+
 
 # ── carga de datos ──
 def _bcra(id_var, desde, hasta):
