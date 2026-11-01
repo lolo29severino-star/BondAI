@@ -1,11 +1,30 @@
 """
-Bond Analytics · aplicación en Streamlit con seis pestañas: Curva en dólares, ONs, Tesoro en pesos, Mi portafolio, Flujos de fondos e
-Informe semanal con IA.
-Ejecutar:  pip install -r requirements.txt   →   streamlit run app.py
-Publicada en internet: ver README.md (GitHub + Streamlit Community Cloud).
-Usa las mismas funciones que el notebook: bondai.py, pesos.py, mercado.py, dolares.py, licitaciones.py, externos.py, portafolio.py,
-herramientas.py e informe.py deben estar en la misma carpeta.
+app.py — la aplicación web de Bond Analytics, hecha con Streamlit.
+
+Cómo funciona: Streamlit ejecuta este archivo de arriba abajo cada vez que el usuario toca algo (un botón, una opción). Por eso
+todo lo que baja datos o hace cuentas pesadas está en funciones con caché (sección 2): se calcula una vez y se reusa. La app no
+hace cuentas financieras por su cuenta: llama a los módulos (bondai, pesos, externos, portafolio, informe…) y muestra lo que
+devuelven en tablas, métricas y gráficos.
+
+Índice
+   1. Encabezado: librerías, módulos propios y configuración de la página
+   2. Datos: las funciones que bajan y calculan, con caché
+   3. Tablas y gráficos: formato argentino, colores y los gráficos de matplotlib
+   4. Guía: los textos que explican cada pestaña y cada término
+   5. Barra lateral y parte de arriba: opciones, fuentes, números principales y las seis pestañas
+   6. Pestaña «Curva en dólares»        → bondai.analisis_usd, herramientas.tabla_retornos
+   7. Pestaña «ONs»                     → externos (tabla_ons, ons_calculables, tir_on), herramientas.spread_ons
+   8. Pestaña «Tesoro en pesos»         → pesos.calcular, con el dólar de los futuros de A3
+   9. Pestaña «Mi portafolio»           → portafolio (cartera, resumen, krd_cartera, escenario, var_historico), herramientas.comparar_indice
+  10. Pestaña «Flujos de fondos»        → los flujos de cada bono (bondai, pesos y externos)
+  11. Pestaña «Informe semanal con IA»  → informe (semana, contexto_portafolio, redactar con Claude y pdf)
+
+Ejecutar en la compu: pip install -r requirements.txt → streamlit run app.py
+Publicada en internet con GitHub + Streamlit Community Cloud (ver README.md). Todos los módulos tienen que estar en la misma carpeta.
 """
+
+# ── 1. Encabezado: librerías, módulos propios y configuración de la página ───────────────────────────────────
+# Los módulos propios se importan con un alias corto: B = bondai, P = pesos, X = externos, PF = portafolio, I = informe, etc.
 import io
 import os
 import re
@@ -38,39 +57,89 @@ def ver_grafico(fig, destino=None):
     (destino or st).image(buf, width="stretch")
 
 
-# ── datos y cálculos (cacheados para que la app responda rápido) ──
+# ── 2. Datos: las funciones que bajan y calculan, con caché ──────────────────────────────────────────────────
+# @st.cache_data guarda lo que devuelve la función según sus argumentos: la primera vez baja los datos y las siguientes los
+# reusa hasta que vence el ttl (en segundos). Así la app responde rápido aunque Streamlit ejecute todo el archivo en cada clic.
+# @st.cache_resource es lo mismo para resultados que no se pueden copiar (por ejemplo, funciones como las curvas ajustadas).
+# Cada módulo trae un respaldo del 09/10/2026: si una API no responde, esa parte usa el respaldo y la app sigue funcionando.
+
+# a) Datos de mercado: cada función baja una fuente (o usa su respaldo) y la guarda en caché.
 @st.cache_data(ttl=900, show_spinner="Bajando datos de BYMA y BCRA…")
 def cargar(en_vivo):
+    """Precios de los bonos en dólares (BYMA), series del BCRA (CER, IPC, tipo de cambio) y el REM."""
     d = B.cargar_datos(usar_api=en_vivo)
     d["bajado"] = datetime.now(timezone(timedelta(hours=-3)))  # hora en que se bajaron los datos
     return d
 
 
-@st.cache_data(ttl=900, show_spinner="Calculando los bonos en dólares…")
-def calcular(en_vivo, moneda="mep"):
-    tabla_usd, liq_usd, _ = B.analisis_usd(cargar(en_vivo), moneda)
-    return tabla_usd, liq_usd
+@st.cache_data(ttl=900, show_spinner="Bajando los paneles de BYMA…")
+def cargar_paneles(en_vivo):
+    """Panel de 24 hs de BYMA: el precio de hoy de cada símbolo (sirve para el dólar MEP y las ONs)."""
+    return M.cargar_paneles(usar_api=en_vivo)
 
 
 @st.cache_data(ttl=900, show_spinner="Bajando bonos del Tesoro en pesos…")
 def cargar_pesos(en_vivo):
+    """Precios de los bonos en pesos (BYMA) y CER, TAMAR y A3500 (BCRA)."""
     return P.cargar(usar_api=en_vivo)
-
-
-@st.cache_data(ttl=900, show_spinner="Bajando los paneles de BYMA…")
-def cargar_paneles(en_vivo):
-    return M.cargar_paneles(usar_api=en_vivo)
-
-
 
 
 @st.cache_data(ttl=900, show_spinner="Bajando el histórico de los dólares (BYMA y BCRA)…")
 def cargar_dolares(en_vivo):
+    """Cierres diarios para armar el dólar MEP, el cable y el A3500 (los usa el informe semanal)."""
     return DL.cargar_dolares(usar_api=en_vivo)
 
 
-# Bonos en pesos: el cálculo tarda unos 15 segundos, así que se guarda para cada combinación de supuestos.
-# cache_resource (y no cache_data) porque el resultado incluye funciones (las curvas ajustadas), que no se pueden copiar.
+@st.cache_data(ttl=900, show_spinner="Bajando los futuros de dólar de A3…")
+def cargar_futuros(en_vivo):
+    """Ajustes de los futuros de dólar de A3 Mercados: el dólar oficial que espera el mercado para cada mes."""
+    return X.cargar_futuros(en_vivo)
+
+
+@st.cache_data(ttl=3600, show_spinner="Bajando el riesgo país…")
+def cargar_riesgo(en_vivo):
+    """Riesgo país (EMBI de JP Morgan, por ArgentinaDatos), serie diaria en puntos básicos."""
+    return X.cargar_riesgo_pais(en_vivo)
+
+
+@st.cache_data(ttl=3600, show_spinner="Bajando la curva del Tesoro de EE.UU.…")
+def cargar_ust(en_vivo, fecha):
+    """Curva de tasas del Tesoro de EE.UU. (para el spread de los Globales en el informe)."""
+    return X.cargar_ust(en_vivo, fecha)
+
+
+@st.cache_data(ttl=300, show_spinner="Bajando las obligaciones negociables de data912…")
+def cargar_ons(en_vivo):
+    """Precios de todas las ONs (data912) en pesos, dólar MEP y cable."""
+    return X.cargar_ons(en_vivo)
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def cargar_fichas_ons(en_vivo, raices):
+    """Ficha técnica de BYMA de cada ON (emisor, vencimiento, cupón, frecuencia y amortización)."""
+    return X.cargar_fichas(list(raices), usar_api=en_vivo)
+
+
+@st.cache_data(ttl=3 * 3600, show_spinner="Buscando bonos nuevos del Tesoro en las licitaciones…")
+def nuevos_tesoro(en_vivo):
+    """Bonos en pesos que el Tesoro emitió después del respaldo, con sus condiciones (resultados de las licitaciones)."""
+    return L.instrumentos_nuevos(en_vivo)
+
+
+@st.cache_data(ttl=3600, show_spinner="Bajando el histórico de precios de cada bono (BYMA)…")
+def historicos_pf(en_vivo, simbolos):
+    """Cierres diarios de los bonos de tu cartera (para el VaR y el informe)."""
+    return PF.historicos(list(simbolos), usar_api=en_vivo)
+
+
+# b) Cálculos: los resultados que usan varias pestañas.
+@st.cache_data(ttl=900, show_spinner="Calculando los bonos en dólares…")
+def calcular(en_vivo, moneda="mep"):
+    """Métricas y curvas de los bonos en dólares, valuados en dólar MEP o cable."""
+    tabla_usd, liq_usd, _ = B.analisis_usd(cargar(en_vivo), moneda)
+    return tabla_usd, liq_usd
+
+
 def dolar_futuro(en_vivo):
     """A3500 que esperan los futuros de dólar de A3 para cada fecha (lo usan los dólar linked y el TMVE8). None si no hay futuros."""
     try:
@@ -83,61 +152,37 @@ def dolar_futuro(en_vivo):
         return None
 
 
+# Bonos en pesos: el cálculo tarda unos 15 segundos, así que se guarda para cada combinación de supuestos.
+# cache_resource (y no cache_data) porque el resultado incluye funciones (las curvas ajustadas), que no se pueden copiar.
 @st.cache_resource(ttl=900, show_spinner="Calculando los 55 bonos en pesos…")
 def calcular_pesos(en_vivo, plazo, precio, tamar, infl, dev, curva_be="auto"):
+    """Todos los bonos en pesos con los supuestos elegidos (pesos.calcular)."""
     d = cargar(en_vivo)
     return P.calcular(cargar_pesos(en_vivo), plazo, precio, tamar, infl, ipc_publicado=d["macro"]["ipc"].dropna().to_dict(),
                       rem_mensual=d["rem_mensual"]["mediana"].dropna().to_dict(), dev=dev, curva_be=curva_be, dolar_fut=dolar_futuro(en_vivo))
 
 
-
-
-@st.cache_data(ttl=900, show_spinner="Bajando los futuros de dólar de A3…")
-def cargar_futuros(en_vivo):
-    return X.cargar_futuros(en_vivo)
-
-
-@st.cache_data(ttl=3600, show_spinner="Bajando el riesgo país…")
-def cargar_riesgo(en_vivo):
-    return X.cargar_riesgo_pais(en_vivo)
-
-
-@st.cache_data(ttl=3600, show_spinner="Bajando la curva del Tesoro de EE.UU.…")
-def cargar_ust(en_vivo, fecha):
-    return X.cargar_ust(en_vivo, fecha)
-
-
-@st.cache_data(ttl=300, show_spinner="Bajando las obligaciones negociables de data912…")
-def cargar_ons(en_vivo):
-    return X.cargar_ons(en_vivo)
-
-
+# c) Informe semanal: licitaciones del Tesoro y los números de la semana.
 @st.cache_data(ttl=3 * 3600, show_spinner="Buscando licitaciones nuevas en la Secretaría de Finanzas…")
 def cargar_licitaciones(en_vivo, hoy):
+    """Licitaciones del Tesoro (respaldo + las nuevas, leídas de la Secretaría de Finanzas) y la próxima."""
     dp = cargar_pesos(en_vivo)
     return L.actualizar(en_vivo, dp["cer"], dp["tamar"], dp["a3500"], hoy)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def informe_semana(en_vivo, hoy, ons=()):
+    """Cómo se movieron los bonos, el dólar y el riesgo país entre el último cierre y el de una semana antes."""
     dp = cargar_pesos(en_vivo)
     riesgo, _ = cargar_riesgo(en_vivo)
     sub, col, _, _ = cargar_licitaciones(en_vivo, hoy)
     return I.semana(en_vivo, dp["cer"], dp["tamar"], riesgo, DL.series(cargar_dolares(en_vivo)), (sub, col), ons=ons)
 
 
-
-
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def cargar_fichas_ons(en_vivo, raices):
-    return X.cargar_fichas(list(raices), usar_api=en_vivo)
-
-
-@st.cache_data(ttl=3600, show_spinner="Bajando el histórico de precios de cada bono (BYMA)…")
-def historicos_pf(en_vivo, simbolos):
-    return PF.historicos(list(simbolos), usar_api=en_vivo)
-
-
+# ── 3. Tablas y gráficos: formato argentino, colores y los gráficos de matplotlib ────────────────────────────
+# mostrar() arma todas las tablas: formatea cada columna y pinta de verde lo que sube y de rojo lo que baja.
+# Los grafico_*() devuelven una figura de matplotlib; ver_grafico() (sección 1) la muestra como imagen.
+# a) Tablas
 # colores de las variaciones: (factor para llevar a decimal, piso de la escala, invertir el signo)
 CALOR = {"var": (1, 0.005, False), "var_periodo": (1, 0.01, False), "pb_rend": (1e-4, 0.001, True), "premio_pb": (1e-4, 0.01, False),
          "pct": (1, 0.003, False), "pp": (1, 0.03, False)}
@@ -177,7 +222,158 @@ def mostrar(df, formatos, nombres=None, na="–", calor=None):
     st.dataframe(out.style.apply(lambda _: est, axis=None) if calor else out, width="stretch")
 
 
-# ── guía para quien no sabe de finanzas: qué responde cada pestaña y qué significa cada cosa ──
+
+# b) Colores y formato de números
+VERDE, ROJO, GRIS, AZUL, VIOLETA = "#16a05a", "#d64545", "#8a96aa", "#2a78d6", "#7a5cf0"
+
+
+def num_es(v, d=2):
+    """Número con punto de miles y coma decimal: 1.234,56."""
+    return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+num_ar = lambda v, d=0: num_es(v, d)   # sin decimales por defecto
+
+
+# c) Gráficos (matplotlib): cada función recibe una tabla y devuelve la figura
+def ejes_log_dias(ax, xs):
+    """Eje x en escala logarítmica con marcas en días redondos (7, 30, 90, 365…)."""
+    ticks = [t for t in [7, 15, 30, 60, 90, 180, 365, 540, 730, 1000, 1500, 2000, 3000, 5000, 7000] if min(xs) * 0.85 <= t <= max(xs) * 1.15]
+    ax.set_xscale("log"); ax.set_xticks(ticks); ax.set_xticklabels([f"{t:,}".replace(",", ".") for t in ticks])
+    ax.minorticks_off()
+
+
+def pb(v):
+    """Puntos básicos con signo, sin '-0'."""
+    return "0 pb" if abs(v) < 0.5 else f"{v:+.0f} pb"
+
+
+def etiquetar(ax, xs, ys, textos, extra=None, fs=7):
+    """Escribe el ticker al lado de cada punto del gráfico."""
+    for i, (x, y, t) in enumerate(zip(xs, ys, textos)):
+        ax.annotate(t + (f"  {extra[i]}" if extra is not None else ""), (x, y), xytext=(4, 3), textcoords="offset points", fontsize=fs)
+
+
+def grafico_pesos(df, ycol, curva=None, color="#2a78d6", ylab="TIREA", xlab="Años al vencimiento"):
+    """Gráfico genérico de una tasa contra el plazo, con la curva de tasa fija de referencia (lo usan los duales)."""
+    fig, ax = plt.subplots(figsize=(7.5, 3.1))
+    d = df[np.isfinite(df[ycol].astype(float))]
+    ax.scatter(d["x"], d[ycol] * 100, color=color, zorder=3, s=28)
+    etiquetar(ax, d["x"], d[ycol] * 100, d.index)
+    if curva is not None and len(d):
+        g = np.linspace(max(0.03, d["x"].min() * 0.8), d["x"].max() * 1.04, 80)
+        ax.plot(g, [curva(x) * 100 for x in g], color="#2a78d6", alpha=.55, lw=1.5)
+    ax.set_xlabel(xlab); ax.set_ylabel(ylab + " %")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_cer_tir(df):
+    """TIR real contra el plazo (escala logarítmica): verde rinde más que la curva (barato), rojo rinde menos (caro)."""
+    d = df[df["dias"] >= 7]
+    base = d[d["dias"] >= 30]
+    fit = M.ajustar_curva(base["dias"], base["tir_real"], "auto", 365) if len(base) >= 3 else None
+    res = d["tir_real"] - (fit[0](d["dias"]) if fit else d["tir_real"])
+    col = [GRIS if dd < 30 else (VERDE if r > 0 else ROJO) for dd, r in zip(d["dias"], res)]
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    ax.scatter(d["dias"], d["tir_real"] * 100, c=col, s=[45 if c else 30 for c in d["canje"]], marker="o", zorder=3)
+    etiquetar(ax, d["dias"], d["tir_real"] * 100, d.index)
+    if fit:
+        g = np.geomspace(base["dias"].min(), base["dias"].max(), 120)
+        ax.plot(g, fit[0](g) * 100, color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()}")
+        ax.legend(fontsize=8, loc="lower right")
+    ejes_log_dias(ax, d["dias"]); ax.set_xlabel("Plazo (días, escala logarítmica)"); ax.set_ylabel("TIR real %")
+    ax.grid(alpha=.25); fig.tight_layout()
+    return fig
+
+
+def grafico_be(df, max_cero):
+    """Inflación breakeven mensual por plazo con su curva y banda de ±1σ; arriba de la curva el CER está caro."""
+    d = df[np.isfinite(df["be_mensual"].astype(float))]
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    if d.empty:
+        ax.text(.5, .5, "Sin bonos con breakeven en ese plazo", ha="center", transform=ax.transAxes); return fig
+    fit = M.ajustar_curva(d["plazo_be"], d["be_mensual"], "auto", 365)
+    res = d["be_mensual"] - (fit[0](d["plazo_be"]) if fit else d["be_mensual"])
+    ax.scatter(d["plazo_be"], d["be_mensual"] * 100, c=[ROJO if r > 0 else VERDE for r in res], s=40, zorder=3)
+    etiquetar(ax, d["plazo_be"], d["be_mensual"] * 100, d.index)
+    g = np.linspace(d["plazo_be"].min(), d["plazo_be"].max(), 80)
+    if fit:
+        ax.plot(g, fit[0](g) * 100, color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()} · ±1σ = {fit[2] * 1e4:.0f} pb")
+        ax.fill_between(g, (fit[0](g) - fit[2]) * 100, (fit[0](g) + fit[2]) * 100, color=AZUL, alpha=.12, lw=0)
+    ax.plot(d["plazo_be"], d["rem_mensual"] * 100, ls="--", color=VIOLETA, lw=1.3, label="REM para los mismos meses")
+    ax.set_xlabel("Plazo (días)"); ax.set_ylabel("Inflación breakeven mensual %"); ax.legend(fontsize=8); ax.grid(alpha=.25)
+    fig.tight_layout()
+    return fig
+
+
+def grafico_fija(df, curva):
+    """Curva de tasa fija en pesos: TIREA contra duración de LECAP (círculos), BONCAP (cuadrados) y BONTE (triángulos), con la curva ajustada."""
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    d = df[df["dias"] >= 7]
+    for tipo, mk, col in (("LECAP", "o", AZUL), ("BONCAP", "s", VIOLETA), ("BONTE", "^", "#1baf7a")):
+        x = d[d["tipo"] == tipo]
+        if len(x):
+            ax.scatter(x["x"], x["tirea"] * 100, marker=mk, color=col, s=42, zorder=3, label=tipo)
+            etiquetar(ax, x["x"], x["tirea"] * 100, x.index)
+    if len(d):
+        g = np.linspace(max(0.03, d["x"].min() * 0.8), d["x"].max() * 1.04, 100)
+        ax.plot(g, [curva(v) * 100 for v in g], color=GRIS, lw=1.5, label="Curva de tasa fija")
+    ax.set_xlabel("Duración (años)"); ax.set_ylabel("TIREA %"); ax.grid(alpha=.25); ax.legend(fontsize=8, loc="lower right")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_dl(df, curva):
+    """Cuánto rendiría en pesos cada dólar linked si el dólar oficial sigue a los futuros, contra la curva de tasa fija.
+    Verde: rinde más que la tasa fija; rojo: menos. Hueco: el dólar sale de extrapolar los futuros. Claro: poco operado."""
+    from matplotlib.lines import Line2D
+    d = df[(df["dias"] >= 30) & np.isfinite(df["tirea_esperada"].astype(float))]
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    if d.empty:
+        ax.text(.5, .5, "Sin dólar linked con más de 30 días", ha="center", transform=ax.transAxes); return fig
+    for t, r in d.iterrows():
+        col = VERDE if r["vs_fija_pb"] > 0 else ROJO
+        poco = r["vol"] < 20
+        ax.scatter(r["x"], r["tirea_esperada"] * 100, s=55, zorder=3, alpha=.45 if poco else 1,
+                   facecolors="none" if r["extrapolado"] else col, edgecolors=col, linewidths=1.6)
+        ax.annotate(t + (" *" if r["extrapolado"] else "") + (" °" if poco else ""), (r["x"], r["tirea_esperada"] * 100),
+                    xytext=(5, 3), textcoords="offset points", fontsize=7)
+    g = np.linspace(max(0.05, d["x"].min() * 0.85), d["x"].max() * 1.05, 100)
+    ax.plot(g, [curva(x) * 100 for x in g], color=AZUL, lw=1.6, alpha=.75)
+    ax.set_xlabel("Años al vencimiento"); ax.set_ylabel("Rinde en pesos (TIREA esperada %)", fontsize=8); ax.grid(alpha=.25)
+    ax.legend(handles=[Line2D([], [], marker="o", ls="", color=VERDE, label="Rinde más que la tasa fija"),
+                       Line2D([], [], marker="o", ls="", color=ROJO, label="Rinde menos que la tasa fija"),
+                       Line2D([], [], color=AZUL, lw=1.6, label="Tasa fija al mismo plazo (LECAP, BONCAP y BONTE)")], fontsize=8, loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_margen_tamar(tam, dual, tamar_sup):
+    """Margen sobre la TAMAR supuesta contra el plazo, con los duales (*) y una curva de mejor ajuste."""
+    fig, ax = plt.subplots(figsize=(10, 3.6))
+    pts = []
+    for df, col, mk, dual_ in ((tam, M.COLORES["tamar"], "o", False), (dual, M.COLORES["dual"], "^", True)):
+        if df.empty:
+            continue
+        ax.scatter(df["dias"], df["margen_s_tamar"], color=col, marker=mk, s=40, zorder=3, label="Duales (*)" if dual_ else "TAMAR")
+        etiquetar(ax, df["dias"], df["margen_s_tamar"], [t + (" *" if dual_ else "") for t in df.index])
+        pts += list(zip(df["dias"], df["margen_s_tamar"]))
+    if len(pts) >= 3:
+        x, y = zip(*pts)
+        fit = M.ajustar_curva(x, y, "auto", 365)
+        if fit:
+            g = np.linspace(min(x), max(x), 100)
+            ax.plot(g, fit[0](g), color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()}")
+    ax.axhline(0, color=GRIS, lw=.8, ls="--")
+    ax.set_xlabel("Plazo (días)"); ax.set_ylabel(f"Margen s/ TAMAR (TAMAR supuesta {tamar_sup:.2f}%)", fontsize=8)
+    ax.legend(fontsize=8); ax.grid(alpha=.25); fig.tight_layout()
+    return fig
+
+
+# ── 4. Guía: los textos que explican cada pestaña y cada término ─────────────────────────────────────────────
+# GUIA tiene, para cada pestaña, una frase (recuadro azul) y una lista de términos (desplegable «¿Qué significa cada cosa?»).
+# guia(clave) los muestra arriba de cada pestaña. GLOSARIO_PF son las explicaciones de los indicadores de «Mi portafolio».
 GUIA = {
     "inicio": {"titulo": "¿Qué son estos números?", "intro": None, "terminos": [
         ("TIR mediana de los bonos en dólares", "cuánto rinde por año, en dólares, el bono típico del Estado si lo comprás hoy y lo tenés hasta que vence. "
@@ -297,7 +493,36 @@ def guia(clave, terminos=None):
             st.markdown("\n".join(f"- **{t}:** {d}" for t, d in lista).replace("$", "\\$"))
 
 
-# ── barra lateral ──
+
+GLOSARIO_PF = {
+    "Valor de mercado": "Lo que vale hoy la cartera: nominales × precio / 100 de cada bono. Los bonos en dólares se pasan a pesos al dólar MEP (o cable, si lo elegiste).",
+    "Duración modificada": "Cuánto cae el valor de la cartera, en %, si todas las tasas suben 1 punto porcentual. Una duración de 3 quiere decir: tasas +1 pp → cartera −3%. "
+                           "Es el promedio de la duración de cada bono, ponderado por su peso.",
+    "DV01": "La misma idea en plata: cuántos pesos (o dólares) perdés si todas las tasas suben 1 punto básico (0,01%).",
+    "Convexidad": "La curvatura de la relación precio-tasa. Con más convexidad, cuando las tasas bajan ganás un poco más y cuando suben perdés un poco menos "
+                  "de lo que dice la duración. Importa en movimientos grandes.",
+    "Plazo promedio": "Cuántos días faltan, en promedio ponderado por valor, hasta el vencimiento de los bonos.",
+    "Mayor exposición": "El grupo de bonos con más peso y cuántos bonos «efectivos» tenés: 1 / suma de los pesos al cuadrado. Con 10 bonos de igual peso son 10; "
+                        "si uno pesa 90%, aunque tengas 10, es como tener poco más de 1.",
+    "Key rate durations (KRD)": "Reparten la duración entre plazos de la curva (3 meses, 6 meses, 1, 2, 3, 5, 7, 10, 15 y 20 años). Dicen cuánto perdés si sube "
+                                "solo la tasa de ese plazo: la curva casi nunca se mueve pareja.",
+    "Escenarios de tasas": "Se elige cuánto sube o baja cada plazo de la curva y se revalúa cada bono descontando sus flujos a su TIR más el shock del plazo de "
+                           "cada pago. La aproximación lineal (KRD × shock) no tiene en cuenta la convexidad: la diferencia entre las dos es la convexidad.",
+    "VaR histórico": "Value at Risk: la pérdida que solo se habría superado en el (1 − confianza) de los días del período, si hubieras tenido esta misma "
+                     "cartera en cada rueda. VaR 99% a 1 día de $100.000: en 99 de cada 100 días la pérdida fue menor.",
+    "Expected shortfall": "La pérdida promedio en ese 1% (o 5%) de peores días: mira qué tan mala es la cola, no solo dónde empieza.",
+    "Volatilidad anual": "Desvío estándar de los resultados diarios de la cartera, llevado a un año (× √252).",
+    "Bullet, barbell y ladder": "Bullet: vencimientos concentrados alrededor de un plazo. Barbell: cargada en las dos puntas (corto y largo) con poco en el "
+                                "medio. Ladder: repartida en escalones parejos a lo largo de la curva, que se van reinvirtiendo de a poco.",
+}
+
+
+# ── 5. Barra lateral y parte de arriba: opciones, fuentes, números principales y las seis pestañas ───────────
+# Primero se leen las opciones de la barra lateral (datos en vivo o respaldo, dólar MEP o cable), se buscan los bonos nuevos del
+# Tesoro y se bajan los datos. Después van los números de arriba (TIR mediana, riesgo país, inflación) y se crean las pestañas:
+# cada «with tab…:» de las secciones siguientes escribe dentro de su pestaña.
+
+# a) Opciones de la barra lateral
 st.sidebar.title("Bond Analytics")
 st.sidebar.caption("Terminal de renta fija argentina con IA")
 en_vivo = st.sidebar.toggle("Datos en vivo (APIs de BYMA y BCRA)", value=True,
@@ -317,7 +542,7 @@ def borrar_precios():
         f.clear()
 
 
-# Actualización automática: mientras la página esté abierta, cada 15 minutos vuelve a bajar precios y tasas.
+# b) Actualización automática: mientras la página esté abierta, cada 15 minutos vuelve a bajar precios y tasas.
 # (Sin esto, los datos igual se renuevan solos a los 15 minutos, pero recién cuando alguien toca algo.)
 if st.sidebar.toggle("Actualizar sola cada 15 minutos", value=False, disabled=not en_vivo):
     st.session_state.setdefault("ultima_auto", time.time())
@@ -331,13 +556,10 @@ if st.sidebar.toggle("Actualizar sola cada 15 minutos", value=False, disabled=no
 
     with st.sidebar:
         reloj()
+
+# c) Datos del día y fuentes usadas (la barra lateral dice si cada dato vino de la API o del respaldo)
 D = cargar(en_vivo)
 
-
-@st.cache_data(ttl=3 * 3600, show_spinner="Buscando bonos nuevos del Tesoro en las licitaciones…")
-def nuevos_tesoro(en_vivo):
-    """Bonos en pesos que el Tesoro emitió después del respaldo, con sus condiciones (resultados de las licitaciones)."""
-    return L.instrumentos_nuevos(en_vivo)
 
 
 P.registrar_nuevos(nuevos_tesoro(en_vivo))   # LECAP, BONCAP, CER, TAMAR y dólar linked nuevos se agregan solos
@@ -350,6 +572,7 @@ PAN = cargar_paneles(en_vivo)
 st.sidebar.write(f"· paneles 24 hs: {PAN['fuente']}")
 
 
+# d) Dólar MEP o cable de hoy, que se usa para pasar a pesos los bonos en dólares
 def px_pan(sym):
     """Precio de un símbolo en el panel de 24 hs: VWAP, último, cierre o, antes de la apertura, el cierre anterior."""
     x = PAN["t1"].get(sym) or []
@@ -363,6 +586,9 @@ def dolar_bono(simbolo_usd):
         return v
     s_ = DL.series(cargar_dolares(en_vivo))["mep" if simbolo_usd == "AL30D" else "cable"].dropna()
     return float(s_.iloc[-1]) if len(s_) else np.nan
+
+
+# e) Título, datos que usan varias pestañas y los números de arriba
 st.title("Bond Analytics · Renta fija argentina con IA")
 tabla_usd, liq_usd = calcular(en_vivo, moneda)
 FUT, F_FUT = cargar_futuros(en_vivo)
@@ -379,6 +605,17 @@ if P.NUEVOS:
     st.sidebar.write(f"· bonos nuevos del Tesoro (licitaciones): {', '.join(P.NUEVOS)}")
 st.sidebar.caption(f"Fecha de análisis: {D['fecha']:%d/%m/%Y} · datos bajados a las {D['bajado']:%H:%M} (hora argentina)")
 st.sidebar.caption("Herramienta académica. No es recomendación de inversión.")
+
+# Aviso arriba de todo cuando los precios no son los de la rueda de hoy (para que no se vean precios viejos sin darse cuenta)
+FUENTES_PX = {D["fuente"]["bonos"], cargar_pesos(en_vivo)["fuente"]["precios"], PAN["fuente"]}
+if not en_vivo:
+    st.info("«Datos en vivo» está apagado: los precios son los del respaldo (cierre del 09/10/2026).")
+elif "respaldo" in FUENTES_PX:
+    st.warning("No se pudieron bajar los precios de hoy (ni de BYMA ni de data912), así que algunos precios son los del respaldo "
+               "(cierre del 09/10/2026). Probá «Actualizar datos ahora» en un rato.")
+elif any(f.startswith("data912") for f in FUENTES_PX):
+    st.info("Mercado cerrado (fin de semana, feriado o antes de la apertura): BYMA todavía no tiene precios del día, así que se usa el "
+            "último precio operado (data912). Cuando abra la rueda, la página pasa sola a los precios de BYMA.")
 
 c1, c5, c2, c3, c4 = st.columns([1, 1, 1.25, 0.9, 0.9])
 c1.metric("TIR mediana soberanos USD", f"{tabla_usd['tir'].median():.2%}",
@@ -405,13 +642,17 @@ c4.metric("Último IPC", f"{D['macro']['ipc'].dropna().iloc[-1]:.1f}%", D["macro
           help="La inflación del último mes publicada por el INDEC.")
 guia("inicio")
 
-
+# f) Las seis pestañas: cada sección de abajo escribe dentro de la suya con «with tab…:»
 (tab1, tabN, tabP, tabPF, tabF, tab4) = st.tabs(
     ["Curva en dólares", "ONs", "Tesoro en pesos", "Mi portafolio", "Flujos de fondos", "Informe semanal con IA"])
 
-# ── 1. curva USD ──
+
+# ── 6. Pestaña «Curva en dólares» ────────────────────────────────────────────────────────────────────────────
+# Bonares, Globales y bonos del Tesoro en dólares: tabla de métricas (bondai.analisis_usd), curva Nelson-Siegel por legislación y
+# cuánto ganás según la TIR a la que vendas (herramientas.tabla_retornos).
 with tab1:
     guia("usd")
+    # a) Tabla de métricas por bono (izquierda) y curva Nelson-Siegel de cada legislación (derecha)
     izq, der = st.columns([1.2, 1])
     with izq:
         st.subheader("Métricas por bono")
@@ -442,6 +683,7 @@ with tab1:
         st.caption("Cada punto es un bono: más a la derecha, más largo y más sensible a las tasas; más arriba, más rinde. Las líneas son la curva de "
                    "cada legislación: lo que está por encima de su línea rinde más que sus pares (barato) y lo que está por debajo, menos (caro).")
 
+    # b) Retorno hasta una fecha según la TIR a la que se venda (herramientas.tabla_retornos)
     st.subheader("¿Cuánto ganás o perdés según la TIR a la que vendas?")
     st.caption("Imaginá que comprás hoy, cobrás los intereses y las cuotas de capital hasta la fecha de venta y vendés al precio de ese momento. "
                "Ese precio depende de la TIR que pida el mercado: si la TIR baja, el precio sube y ganás más; si sube, ganás menos o perdés. "
@@ -461,153 +703,12 @@ with tab1:
                    "más largos (más duración, MD) son los que más ganan cuando bajan las tasas y los que más pierden cuando suben.")
 
 
-# ── gráficos y formatos comunes ──
-VERDE, ROJO, GRIS, AZUL, VIOLETA = "#16a05a", "#d64545", "#8a96aa", "#2a78d6", "#7a5cf0"
-
-
-def num_es(v, d=2):
-    """Número con punto de miles y coma decimal: 1.234,56."""
-    return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-num_ar = lambda v, d=0: num_es(v, d)   # sin decimales por defecto
-
-
-def ejes_log_dias(ax, xs):
-    ticks = [t for t in [7, 15, 30, 60, 90, 180, 365, 540, 730, 1000, 1500, 2000, 3000, 5000, 7000] if min(xs) * 0.85 <= t <= max(xs) * 1.15]
-    ax.set_xscale("log"); ax.set_xticks(ticks); ax.set_xticklabels([f"{t:,}".replace(",", ".") for t in ticks])
-    ax.minorticks_off()
-
-
-def pb(v):
-    """Puntos básicos con signo, sin '-0'."""
-    return "0 pb" if abs(v) < 0.5 else f"{v:+.0f} pb"
-
-
-def etiquetar(ax, xs, ys, textos, extra=None, fs=7):
-    for i, (x, y, t) in enumerate(zip(xs, ys, textos)):
-        ax.annotate(t + (f"  {extra[i]}" if extra is not None else ""), (x, y), xytext=(4, 3), textcoords="offset points", fontsize=fs)
-
-
-def grafico_pesos(df, ycol, curva=None, color="#2a78d6", ylab="TIREA", xlab="Años al vencimiento"):
-    fig, ax = plt.subplots(figsize=(7.5, 3.1))
-    d = df[np.isfinite(df[ycol].astype(float))]
-    ax.scatter(d["x"], d[ycol] * 100, color=color, zorder=3, s=28)
-    etiquetar(ax, d["x"], d[ycol] * 100, d.index)
-    if curva is not None and len(d):
-        g = np.linspace(max(0.03, d["x"].min() * 0.8), d["x"].max() * 1.04, 80)
-        ax.plot(g, [curva(x) * 100 for x in g], color="#2a78d6", alpha=.55, lw=1.5)
-    ax.set_xlabel(xlab); ax.set_ylabel(ylab + " %")
-    fig.tight_layout()
-    return fig
-
-
-def grafico_cer_tir(df):
-    """TIR real contra el plazo (escala logarítmica): verde rinde más que la curva (barato), rojo rinde menos (caro)."""
-    d = df[df["dias"] >= 7]
-    base = d[d["dias"] >= 30]
-    fit = M.ajustar_curva(base["dias"], base["tir_real"], "auto", 365) if len(base) >= 3 else None
-    res = d["tir_real"] - (fit[0](d["dias"]) if fit else d["tir_real"])
-    col = [GRIS if dd < 30 else (VERDE if r > 0 else ROJO) for dd, r in zip(d["dias"], res)]
-    fig, ax = plt.subplots(figsize=(10, 3.8))
-    ax.scatter(d["dias"], d["tir_real"] * 100, c=col, s=[45 if c else 30 for c in d["canje"]], marker="o", zorder=3)
-    etiquetar(ax, d["dias"], d["tir_real"] * 100, d.index)
-    if fit:
-        g = np.geomspace(base["dias"].min(), base["dias"].max(), 120)
-        ax.plot(g, fit[0](g) * 100, color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()}")
-        ax.legend(fontsize=8, loc="lower right")
-    ejes_log_dias(ax, d["dias"]); ax.set_xlabel("Plazo (días, escala logarítmica)"); ax.set_ylabel("TIR real %")
-    ax.grid(alpha=.25); fig.tight_layout()
-    return fig
-
-
-def grafico_be(df, max_cero):
-    """Inflación breakeven mensual por plazo con su curva y banda de ±1σ; arriba de la curva el CER está caro."""
-    d = df[np.isfinite(df["be_mensual"].astype(float))]
-    fig, ax = plt.subplots(figsize=(10, 3.8))
-    if d.empty:
-        ax.text(.5, .5, "Sin bonos con breakeven en ese plazo", ha="center", transform=ax.transAxes); return fig
-    fit = M.ajustar_curva(d["plazo_be"], d["be_mensual"], "auto", 365)
-    res = d["be_mensual"] - (fit[0](d["plazo_be"]) if fit else d["be_mensual"])
-    ax.scatter(d["plazo_be"], d["be_mensual"] * 100, c=[ROJO if r > 0 else VERDE for r in res], s=40, zorder=3)
-    etiquetar(ax, d["plazo_be"], d["be_mensual"] * 100, d.index)
-    g = np.linspace(d["plazo_be"].min(), d["plazo_be"].max(), 80)
-    if fit:
-        ax.plot(g, fit[0](g) * 100, color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()} · ±1σ = {fit[2] * 1e4:.0f} pb")
-        ax.fill_between(g, (fit[0](g) - fit[2]) * 100, (fit[0](g) + fit[2]) * 100, color=AZUL, alpha=.12, lw=0)
-    ax.plot(d["plazo_be"], d["rem_mensual"] * 100, ls="--", color=VIOLETA, lw=1.3, label="REM para los mismos meses")
-    ax.set_xlabel("Plazo (días)"); ax.set_ylabel("Inflación breakeven mensual %"); ax.legend(fontsize=8); ax.grid(alpha=.25)
-    fig.tight_layout()
-    return fig
-
-
-def grafico_fija(df, curva):
-    """Curva de tasa fija en pesos: TIREA contra duración de LECAP (círculos), BONCAP (cuadrados) y BONTE (triángulos), con la curva ajustada."""
-    fig, ax = plt.subplots(figsize=(10, 3.8))
-    d = df[df["dias"] >= 7]
-    for tipo, mk, col in (("LECAP", "o", AZUL), ("BONCAP", "s", VIOLETA), ("BONTE", "^", "#1baf7a")):
-        x = d[d["tipo"] == tipo]
-        if len(x):
-            ax.scatter(x["x"], x["tirea"] * 100, marker=mk, color=col, s=42, zorder=3, label=tipo)
-            etiquetar(ax, x["x"], x["tirea"] * 100, x.index)
-    if len(d):
-        g = np.linspace(max(0.03, d["x"].min() * 0.8), d["x"].max() * 1.04, 100)
-        ax.plot(g, [curva(v) * 100 for v in g], color=GRIS, lw=1.5, label="Curva de tasa fija")
-    ax.set_xlabel("Duración (años)"); ax.set_ylabel("TIREA %"); ax.grid(alpha=.25); ax.legend(fontsize=8, loc="lower right")
-    fig.tight_layout()
-    return fig
-
-
-def grafico_dl(df, curva):
-    """Cuánto rendiría en pesos cada dólar linked si el dólar oficial sigue a los futuros, contra la curva de tasa fija.
-    Verde: rinde más que la tasa fija; rojo: menos. Hueco: el dólar sale de extrapolar los futuros. Claro: poco operado."""
-    from matplotlib.lines import Line2D
-    d = df[(df["dias"] >= 30) & np.isfinite(df["tirea_esperada"].astype(float))]
-    fig, ax = plt.subplots(figsize=(10, 3.8))
-    if d.empty:
-        ax.text(.5, .5, "Sin dólar linked con más de 30 días", ha="center", transform=ax.transAxes); return fig
-    for t, r in d.iterrows():
-        col = VERDE if r["vs_fija_pb"] > 0 else ROJO
-        poco = r["vol"] < 20
-        ax.scatter(r["x"], r["tirea_esperada"] * 100, s=55, zorder=3, alpha=.45 if poco else 1,
-                   facecolors="none" if r["extrapolado"] else col, edgecolors=col, linewidths=1.6)
-        ax.annotate(t + (" *" if r["extrapolado"] else "") + (" °" if poco else ""), (r["x"], r["tirea_esperada"] * 100),
-                    xytext=(5, 3), textcoords="offset points", fontsize=7)
-    g = np.linspace(max(0.05, d["x"].min() * 0.85), d["x"].max() * 1.05, 100)
-    ax.plot(g, [curva(x) * 100 for x in g], color=AZUL, lw=1.6, alpha=.75)
-    ax.set_xlabel("Años al vencimiento"); ax.set_ylabel("Rinde en pesos (TIREA esperada %)", fontsize=8); ax.grid(alpha=.25)
-    ax.legend(handles=[Line2D([], [], marker="o", ls="", color=VERDE, label="Rinde más que la tasa fija"),
-                       Line2D([], [], marker="o", ls="", color=ROJO, label="Rinde menos que la tasa fija"),
-                       Line2D([], [], color=AZUL, lw=1.6, label="Tasa fija al mismo plazo (LECAP, BONCAP y BONTE)")], fontsize=8, loc="best")
-    fig.tight_layout()
-    return fig
-
-
-def grafico_margen_tamar(tam, dual, tamar_sup):
-    """Margen sobre la TAMAR supuesta contra el plazo, con los duales (*) y una curva de mejor ajuste."""
-    fig, ax = plt.subplots(figsize=(10, 3.6))
-    pts = []
-    for df, col, mk, dual_ in ((tam, M.COLORES["tamar"], "o", False), (dual, M.COLORES["dual"], "^", True)):
-        if df.empty:
-            continue
-        ax.scatter(df["dias"], df["margen_s_tamar"], color=col, marker=mk, s=40, zorder=3, label="Duales (*)" if dual_ else "TAMAR")
-        etiquetar(ax, df["dias"], df["margen_s_tamar"], [t + (" *" if dual_ else "") for t in df.index])
-        pts += list(zip(df["dias"], df["margen_s_tamar"]))
-    if len(pts) >= 3:
-        x, y = zip(*pts)
-        fit = M.ajustar_curva(x, y, "auto", 365)
-        if fit:
-            g = np.linspace(min(x), max(x), 100)
-            ax.plot(g, fit[0](g), color=AZUL, lw=1.6, label=f"Curva {fit[1].lower()}")
-    ax.axhline(0, color=GRIS, lw=.8, ls="--")
-    ax.set_xlabel("Plazo (días)"); ax.set_ylabel(f"Margen s/ TAMAR (TAMAR supuesta {tamar_sup:.2f}%)", fontsize=8)
-    ax.legend(fontsize=8); ax.grid(alpha=.25); fig.tight_layout()
-    return fig
-
-
-# ── Obligaciones negociables (data912) ──
+# ── 7. Pestaña «ONs» ─────────────────────────────────────────────────────────────────────────────────────────
+# Obligaciones negociables de data912 con su ficha de BYMA: precios en pesos, MEP y cable, las de los grandes emisores contra la
+# curva de los Globales (herramientas.spread_ons) y una calculadora de TIR y paridad técnica (externos.tir_on).
 with tabN:
     guia("ons")
+    # a) Números de arriba: cuántas ONs cotizan, volumen, MEP implícito y canje
     n1, n2, n3, n4 = st.columns(4)
     n1.metric("ONs con precio", f"{TO['precio_mep'].notna().sum()} en MEP", f"{len(TO)} en total", delta_color="off",
               help="Cuántas ONs tuvieron operaciones hoy en dólar MEP.")
@@ -618,6 +719,7 @@ with tabN:
               help="Precio en pesos / precio en dólares de cada ON. Si una ON da un MEP más bajo, conviene usarla para comprar dólares (o al revés).")
     n4.metric("Canje (mediana)", f"{TO['canje'].median():.1%}" if TO["canje"].notna().any() else "–", "cable sobre MEP", delta_color="off",
               help="Cuánto más caro está el dólar cable (en el exterior) que el MEP (en el país), según los precios de las ONs.")
+    # b) Tabla de todas las ONs, con filtro por emisor, búsqueda y orden
     o1, o2, o3 = st.columns([1.4, 1, 1])
     emis = sorted({e for e in TO["emisor"] if e})
     sel_e = o1.multiselect("Emisor", emis, placeholder="Todos")
@@ -644,6 +746,7 @@ with tabN:
                "valor nominal. Emisor, vencimiento y cupón: ficha técnica de BYMA de cada ON (las nuevas se consultan solas). Cupón vacío: tasa variable "
                "o no informada en la ficha.")
 
+    # c) ONs de los grandes emisores contra la curva de los Globales (herramientas.spread_ons)
     st.subheader("Las ONs de los grandes emisores")
     ONS_S = H.spread_ons(ON_OK, tabla_usd)
     if ONS_S is None or ONS_S.empty:
@@ -689,6 +792,7 @@ with tabN:
                    "negras son los soberanos. Las ONs por debajo de la curva de Globales rinden menos que el Estado: el mercado ve a esas empresas "
                    "con menos riesgo (exportan, cobran en dólares). Las ONs muy cortas tienen TIR ruidosa.")
 
+    # d) Calculadora: TIR, duración, valor técnico y paridad de una ON al precio que elijas (externos.tir_on)
     st.subheader("Calculadora de TIR de una ON")
     st.caption("La app completa cupón, vencimiento y cuotas con la ficha técnica de BYMA; revisalos contra el prospecto (la ficha no siempre "
                "informa la frecuencia de pago ni el cronograma de amortización) y la app calcula la TIR, la duración y la paridad al precio de hoy.")
@@ -729,9 +833,14 @@ with tabN:
         st.caption(f"Liquidación {liq_on:%d/%m/%Y} (24 hs). Se toma el precio en dólar MEP como precio sucio (con intereses corridos), igual que los "
                    "soberanos. Las fechas de pago se cuentan hacia atrás desde el vencimiento.")
 
-# ── Tesoro en pesos: una sección por tipo de bono ──
+
+# ── 8. Pestaña «Tesoro en pesos» ─────────────────────────────────────────────────────────────────────────────
+# El usuario elige los supuestos (plazo, precio, TAMAR, inflación y devaluación); calcular_pesos() llama a pesos.calcular y
+# devuelve una tabla por tipo de bono. Hay una solapa por grupo (tasa fija, CER, TAMAR, duales y dólar linked), cada una con
+# su explicación, su tabla (mostrar) y su gráfico. Los dólar linked usan el dólar que esperan los futuros de A3.
 with tabP:
     guia("pesos")
+    # a) Supuestos que elige el usuario y cálculo de todos los bonos en pesos (calcular_pesos → pesos.calcular)
     q1, q2, q3, q4, q5, q6 = st.columns([.9, 1, 1.2, 1.3, 1.3, .8])
     plazo_p = q1.radio("Plazo", ["CI", "24HS"], index=1, horizontal=True, format_func=lambda x: "CI" if x == "CI" else "24 hs")
     precio_p = q2.selectbox("Precio", ["px", "last", "prev"], format_func=lambda x: {"px": "VWAP", "last": "Último", "prev": "Cierre anterior"}[x])
@@ -752,6 +861,7 @@ with tabP:
                + ", ".join(f"{k} {v}" for k, v in DP["fuente"].items()))
     cf, cc = RP["curva_fija"], RP["curva_cer"]
     mens = lambda y: (1 + y) ** (30 / 365) - 1
+    # b) Números de arriba: tasa fija a 6 meses y a 1 año, CER, TAMAR, dólar oficial y dólar futuro
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Tasa fija 6 meses · TEM", f"{mens(cf(0.5)):.2%}", f"TIREA {cf(0.5):.1%}", delta_color="off",
               help="Cuánto paga por mes (TEM) una letra a tasa fija a seis meses; TIREA es lo mismo expresado por año, reinvirtiendo.")
@@ -778,6 +888,7 @@ with tabP:
     if alias:
         st.caption("El ticker base no operó; precio tomado del alias con el mismo ISIN: " + ", ".join(alias))
 
+    # c) Formatos y textos de cada grupo: notas técnicas (NOTAS), resumen corto (EN_POCAS) y explicación con ejemplo (explicacion)
     COM = {"vence": "{:%d/%m/%Y}", "dias": "{:.0f}", "precio": "{:,.2f}", "var": "{:+.2%}", "vol": "{:,.0f}", "md": "{:.2f}", "spread_pb": "{:+.0f}"}
     NOM = {"vence": "Vence", "dias": "Días", "precio": "Precio", "var": "Var.", "vol": "Vol. $M", "md": "MD", "spread_pb": "Spread (pb)"}
     NOTAS = {
@@ -854,6 +965,7 @@ with tabP:
                 f"un dólar de \\${num_es(e['dolar_esperado'], 0)} ({pc(e['suba_esperada'])} más que hoy), así que por cada \\$100.000 invertidos "
                 f"cobrarías unos \\${num_es(e['cobro_100k'], 0)} el {e['vence']:%d/%m/%Y}: {pc(e['tirea_esperada'])} por año, contra "
                 f"{pc(e['tirea_fija'])} de una tasa fija al mismo plazo.")
+    # d) Una solapa por grupo de bonos, cada una con su explicación, su tabla y su gráfico
     # LECAP, BONCAP y BONTE van juntas: son la curva de tasa fija en pesos
     TIPOS_P = [("fija", "Tasa fija: LECAP, BONCAP y BONTE", "Letras y bonos a tasa fija en pesos")] + [x for x in P.TIPOS if x[0] not in ("lecap", "boncap")]
     RPS = {"fija": pd.concat([x for x in (RP["lecap"], RP["boncap"]) if len(x)]).sort_values("vence") if len(RP["lecap"]) + len(RP["boncap"]) else pd.DataFrame(),
@@ -957,36 +1069,20 @@ with tabP:
                     st.caption(" · ".join(notas_dl) + ".")
             st.caption(NOTAS[k])
 
-# ── Mi portafolio: cartera propia con riesgo de tasa, VaR y tipo de cartera ──
-GLOSARIO_PF = {
-    "Valor de mercado": "Lo que vale hoy la cartera: nominales × precio / 100 de cada bono. Los bonos en dólares se pasan a pesos al dólar MEP (o cable, si lo elegiste).",
-    "Duración modificada": "Cuánto cae el valor de la cartera, en %, si todas las tasas suben 1 punto porcentual. Una duración de 3 quiere decir: tasas +1 pp → cartera −3%. "
-                           "Es el promedio de la duración de cada bono, ponderado por su peso.",
-    "DV01": "La misma idea en plata: cuántos pesos (o dólares) perdés si todas las tasas suben 1 punto básico (0,01%).",
-    "Convexidad": "La curvatura de la relación precio-tasa. Con más convexidad, cuando las tasas bajan ganás un poco más y cuando suben perdés un poco menos "
-                  "de lo que dice la duración. Importa en movimientos grandes.",
-    "Plazo promedio": "Cuántos días faltan, en promedio ponderado por valor, hasta el vencimiento de los bonos.",
-    "Mayor exposición": "El grupo de bonos con más peso y cuántos bonos «efectivos» tenés: 1 / suma de los pesos al cuadrado. Con 10 bonos de igual peso son 10; "
-                        "si uno pesa 90%, aunque tengas 10, es como tener poco más de 1.",
-    "Key rate durations (KRD)": "Reparten la duración entre plazos de la curva (3 meses, 6 meses, 1, 2, 3, 5, 7, 10, 15 y 20 años). Dicen cuánto perdés si sube "
-                                "solo la tasa de ese plazo: la curva casi nunca se mueve pareja.",
-    "Escenarios de tasas": "Se elige cuánto sube o baja cada plazo de la curva y se revalúa cada bono descontando sus flujos a su TIR más el shock del plazo de "
-                           "cada pago. La aproximación lineal (KRD × shock) no tiene en cuenta la convexidad: la diferencia entre las dos es la convexidad.",
-    "VaR histórico": "Value at Risk: la pérdida que solo se habría superado en el (1 − confianza) de los días del período, si hubieras tenido esta misma "
-                     "cartera en cada rueda. VaR 99% a 1 día de $100.000: en 99 de cada 100 días la pérdida fue menor.",
-    "Expected shortfall": "La pérdida promedio en ese 1% (o 5%) de peores días: mira qué tan mala es la cola, no solo dónde empieza.",
-    "Volatilidad anual": "Desvío estándar de los resultados diarios de la cartera, llevado a un año (× √252).",
-    "Bullet, barbell y ladder": "Bullet: vencimientos concentrados alrededor de un plazo. Barbell: cargada en las dos puntas (corto y largo) con poco en el "
-                                "medio. Ladder: repartida en escalones parejos a lo largo de la curva, que se van reinvirtiendo de a poco.",
-}
 
+# ── 9. Pestaña «Mi portafolio» ───────────────────────────────────────────────────────────────────────────────
+# Cargás bonos y nominales (o subís un CSV). portafolio.cartera arma una fila por bono con valor, peso, duración y KRD; después
+# vienen el resumen, el tipo de cartera, las key rate durations, los escenarios de tasas, el VaR histórico y la comparación
+# contra un índice. H_ guarda la historia de precios de la cartera para el informe semanal.
 H_ = {}   # historia de precios de tu cartera: la completa esta pestaña y la usa el informe semanal
 with tabPF:
     guia("pf", list(GLOSARIO_PF.items()))
+    # a) Los bonos que se pueden cargar: en dólares, en pesos y ONs (portafolio.universo y agregar_ons)
     tc_pf = dolar_bono("AL30C" if moneda == "ccl" else "AL30D")
     UPF = PF.agregar_ons(PF.universo(tabla_usd, liq_usd, RP0, tc_pf, moneda), ON_OK, liq_usd, tc_pf)
     orden_g = {g: i for i, g in enumerate(PF.GRUPOS)}
     opciones_pf = sorted(UPF, key=lambda t: (orden_g[UPF[t]["grupo"]], UPF[t]["vence"], t))
+    # b) Cargar la cartera: moneda, cartera de ejemplo, tabla editable y archivo CSV
     e1, e2 = st.columns([1, 2.2])
     with e1:
         moneda_pf = st.radio("Valuar en", ["ARS", "USD"], horizontal=True, key="pf_moneda",
@@ -1032,6 +1128,7 @@ with tabPF:
         except Exception as e_:
             st.error(f"No pude leer el archivo ({type(e_).__name__}). Tiene que ser un CSV con las columnas Bono y Nominales.")
     pos = ed.dropna().groupby("Bono")["Nominales"].sum().to_dict() if len(ed) else {}
+    # c) Una fila por bono con valor, peso, duración y key rate durations (portafolio.cartera)
     CPF = PF.cartera(UPF, pos, moneda_pf, tc_pf, hoy=liq_usd)
     if CPF.empty:
         st.info("Agregá al menos un bono con nominales para ver los indicadores.")
@@ -1045,6 +1142,7 @@ with tabPF:
                 {"nominales": "{:,.0f}", "precio": "{:,.2f}", "valor": "{:,.0f}", "peso": "{:.1%}", "tir": "{:.2%}", "md": "{:.2f}", "vence": "{:%d/%m/%Y}", "dias": "{:.0f}"},
                 {"grupo_n": "Grupo", "sub": "Tipo", "nominales": "Nominales", "precio": "Precio", "valor": f"Valor {mon}", "peso": "Peso", "tir": "Tasa",
                  "tasa_tipo": "Qué tasa es", "md": "MD", "vence": "Vence", "dias": "Días"})
+        # d) Indicadores de toda la cartera (portafolio.resumen)
         k1, k2, k3 = st.columns(3)
         k4, k5, k6 = st.columns(3)
         k1.metric("Valor de mercado", plata(RS["valor"]), f"{RS['n']} bonos", delta_color="off", help=GLOSARIO_PF["Valor de mercado"])
@@ -1057,6 +1155,7 @@ with tabPF:
         st.caption("Tasa de cada grupo, ponderada por valor: " + " · ".join(f"{PF.GRUPOS[g]} {v:.2%} ({PF.TASA_DE[g]})" for g, v in RS["tir_por_grupo"].items()) +
                    ". Las tasas no se suman entre grupos: cada una está en su propia moneda (dólares, pesos o pesos ajustados por inflación).")
 
+        # e) Tipo de cartera: bullet, barbell o ladder (portafolio.tipo_cartera)
         st.subheader("Qué tipo de cartera es")
         TC = PF.tipo_cartera(CPF)
         t1_, t2_, t3_, t4_ = st.columns([1, 1, 1, 1.4])
@@ -1073,6 +1172,7 @@ with tabPF:
         st.caption(f"**{TC['tipo']}**: {TC['explicacion']} Se clasifica por el vencimiento de cada bono, pesado por su valor. Los bonos que amortizan en "
                    "cuotas (AL30, GD35…) cobran antes del vencimiento: su riesgo real por plazo está en las key rate durations.")
 
+        # f) Cómo se reparte el valor por grupo y por plazo
         st.subheader("Cómo está distribuida")
         dd1, dd2, dd3 = st.columns(3)
         for col, campo, titulo, mapa in [(dd1, "grupo", "Por grupo", PF.GRUPOS), (dd2, "moneda", "Por moneda de pago", {"USD": "Dólares", "ARS": "Pesos"}),
@@ -1088,6 +1188,7 @@ with tabPF:
                 ax.spines[sp].set_visible(False)
             fig.tight_layout(); ver_grafico(fig, col)
 
+        # g) Key rate durations: cuánto riesgo de tasa hay en cada plazo (portafolio.krd_cartera)
         st.subheader("Duración y key rate durations")
         KR = PF.krd_cartera(CPF)
         gk = [g for g in PF.GRUPOS if g in KR.columns and KR[g].abs().sum() > 0]
@@ -1102,6 +1203,7 @@ with tabPF:
         st.caption(GLOSARIO_PF["Key rate durations (KRD)"] + " La suma de las barras es la duración de la cartera. TAMAR y duales llevan duración efectiva "
                    "casi nula: la TAMAR futura acompaña a la tasa, así que su riesgo es el margen.")
 
+        # h) Escenarios de tasas: revaluación completa contra la aproximación lineal (portafolio.escenario)
         st.subheader("Escenarios de tasas")
         es1, es2, es3 = st.columns([1.6, .8, 1.2])
         esc = es1.selectbox("Escenario", list(PF.ESCENARIOS), format_func=PF.ESCENARIOS.get, key="pf_esc")
@@ -1145,6 +1247,7 @@ with tabPF:
         st.caption("Todas las tasas se mueven igual. La primera columna aproxima con la serie de Taylor (−MD × Δy + ½ × C × Δy²); la segunda revalúa cada bono con "
                    "sus flujos. La diferencia son los términos de orden 3 en adelante: en movimientos grandes la aproximación falla.")
 
+        # i) VaR histórico con los cierres diarios de BYMA (portafolio.retornos y var_historico)
         st.subheader("Value at Risk")
         v1, v2, v3 = st.columns(3)
         conf = v1.selectbox("Confianza", [0.99, 0.95], format_func=lambda c: f"{c:.0%}", key="pf_conf")
@@ -1187,6 +1290,7 @@ with tabPF:
                        "duraciones. En pesos, los bonos en dólares incluyen el movimiento del tipo de cambio; en dólares, al revés. El % del riesgo es la "
                        "contribución de cada bono a la varianza de la cartera (suma 100%).")
 
+        # j) La cartera contra un índice de bonos (herramientas.comparar_indice)
         st.subheader("Tu cartera contra un índice de bonos")
         st.caption("Qué hubiera pasado en los últimos meses con la cartera de hoy (mismos pesos de cada bono) contra un índice de igual peso. "
                    "No es lo que ganaste de verdad: es una prueba hacia atrás para ver si tu cartera fue más o menos volátil y si le ganó al mercado.")
@@ -1232,10 +1336,11 @@ with tabPF:
                            "completan como en el VaR. Correlación con el índice: " + f"{ST_['corr']:.2f}.")
 
 
-
-# ── Flujos de fondos: todos los bonos ──
+# ── 10. Pestaña «Flujos de fondos» ───────────────────────────────────────────────────────────────────────────
+# Elegís un bono (en dólares, en pesos u ON) y los nominales: cada pago de renta y capital, la TIR y el próximo pago de todos.
 with tabF:
     guia("flujos")
+    # a) La lista de bonos para elegir: en dólares, en pesos y ONs
     USDU = B.universo_usd()
     DL_TK = {t for t, _, _ in P.DL} | {"TMVE8"}
     pesos_tk = [t for k, _, _ in P.TIPOS if len(RP[k]) for t in RP[k].index]
@@ -1260,6 +1365,7 @@ with tabF:
         st.session_state["_flujos_bono"], st.session_state["_flujos_vn_usd"] = (bono_f, moneda), vn_usd
     vn_f = f2.number_input("Nominales", min_value=1, step=100, key="vn_flujos")
     px_f = f3.number_input("Precio de compra", min_value=0.01, step=0.1, key="px_flujos")
+    # b) Los pagos del bono elegido, su TIR y el valor presente de cada pago
     if es_usd:
         if es_on:
             o_ = ON_OK.loc[bono_f]
@@ -1351,6 +1457,7 @@ with tabF:
                 {"dias": "Días", "renta": "Renta / interés", "capital": "Capital", "total": "Total proyectado", "real": "En pesos de hoy", "usd": "En dólares",
                  "vp": "Valor presente"})
 
+    # c) El próximo pago de todos los bonos
     st.subheader("Próximo pago de cada bono")
     grupo_f = st.radio("Mostrar", ["Todos", "En dólares", "En pesos", "ONs"], horizontal=True, key="grupo_flujos",
                        format_func={"Todos": "Todos", "En dólares": "Soberanos en dólares", "En pesos": "En pesos", "ONs": "Obligaciones negociables"}.get)
@@ -1392,8 +1499,13 @@ with tabF:
                "son estimaciones con los supuestos de la pestaña Tesoro en pesos. ONs: condiciones de la ficha técnica de BYMA (pagos semestrales si la ficha no "
                "informa la frecuencia; fechas contadas hacia atrás desde el vencimiento), una aproximación al prospecto.")
 
-# ── 4. LLM ──
+
+# ── 11. Pestaña «Informe semanal con IA» ─────────────────────────────────────────────────────────────────────
+# Python calcula todos los números de la semana (informe.semana y lo que suma la app: dólar futuro, breakeven, licitación,
+# ONs, agenda y tu portafolio), los pasa en un JSON a Claude (informe.redactar) y arma el PDF (informe.pdf). Sin clave de
+# Anthropic, una plantilla escribe el mismo texto.
 with tab4:
+    # a) Clave de Anthropic (de los Secrets o escrita en la página) y opciones
     st.subheader("Informe semanal con IA")
     guia("informe")
     st.caption("Cubre el dólar, el riesgo país, los bonos del Estado en dólares y en pesos, las ONs, la licitación del Tesoro y lo que viene en las "
@@ -1415,6 +1527,7 @@ with tab4:
                                   "y qué dicen sus indicadores (duración, DV01, convexidad, tipo de cartera, exposición y VaR).")
     if hay_pf:
         st.caption(f"Tu portafolio hoy: {len(CPF)} bonos, valor {'US$' if moneda_pf == 'USD' else '$'} {num_es(float(CPF['valor'].sum()), 0)}.")
+    # b) Al tocar el botón: Python calcula los números, Claude (o la plantilla) redacta y se arma el PDF
     if st.button("Generar el informe de la semana", type="primary"):
         if clave:
             os.environ["ANTHROPIC_API_KEY"] = clave
@@ -1477,6 +1590,7 @@ with tab4:
             pdf_ = I.pdf(S_, texto_, origen_, ctx_)
             st.session_state["informe"] = {"texto": texto_, "origen": origen_, "pdf": pdf_, "ctx": ctx_, "ini": S_["ini"], "fin": S_["fin"],
                                            "ind": S_["indicadores"], "tabla": S_["tabla"], "ons": S_.get("ons", pd.DataFrame())}
+    # c) Mostrar el informe: números, texto con títulos, tablas y el botón para bajar el PDF
     INF = st.session_state.get("informe")
     if INF:
         st.markdown(f"**Semana del {INF['ini']:%d/%m/%Y} al {INF['fin']:%d/%m/%Y}** · {INF['ctx']['semana']['precios']} · texto: {INF['origen']}")

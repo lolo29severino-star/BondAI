@@ -1,4 +1,20 @@
-"""bondai.py — datos de BYMA, BCRA y REM, y bonos soberanos en dólares (flujos, TIR, duración, convexidad, paridad y curvas Nelson-Siegel)."""
+"""
+bondai.py — los datos básicos (BYMA, BCRA y REM) y los bonos soberanos en dólares.
+
+Lo usan: la pestaña «Curva en dólares» y, a través de ella, «Mi portafolio», «Flujos de fondos» y el informe semanal.
+
+Índice
+  1. Bajar datos: series del BCRA, paneles de BYMA (o el último precio de data912 con el mercado cerrado) y el REM;
+     cargar_datos() junta todo (o usa el respaldo del 09/10/2026)
+  2. Fechas: días 30/360, sumar meses, días hábiles y feriados
+  3. Flujos de fondos: cupones y amortizaciones de cada Bonar, Global y bono del Tesoro en dólares
+  4. Métricas y curvas: TIR, duración, convexidad, valor técnico, paridad y curva Nelson-Siegel por legislación
+
+Ejemplo:
+    import bondai as B
+    D = B.cargar_datos(usar_api=True)                 # precios, CER, IPC, tipo de cambio y REM
+    tabla, liq, bonos = B.analisis_usd(D, "mep")      # una fila por bono con TIR, MD, convexidad, paridad y spread
+"""
 import base64
 import json
 import warnings
@@ -32,8 +48,11 @@ print("Respaldo:", RESPALDO["fecha_datos"], "·", ", ".join(RESPALDO["fuentes"].
 
 BCRA_API = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias"
 BYMA_API = "https://open.bymadata.com.ar/vanoms-be-core/rest/api/bymadata/free"
+DATA912 = "https://data912.com/live"   # último precio operado: sirve cuando BYMA vacía su panel (fines de semana, feriados, antes de abrir)
+UA = {"User-Agent": "Mozilla/5.0 (Bond Analytics, trabajo académico)"}
 
 
+# ── 1. Bajar datos: BCRA, BYMA y REM (con respaldo) ────────────────────────────────────────────────────────────
 def bcra_serie(id_variable, desde, hasta):
     """Serie diaria o mensual del BCRA como pd.Series indexada por fecha."""
     filas, offset = [], 0
@@ -67,8 +86,24 @@ def byma_panel(ruta, plazo="24HS"):
     r.raise_for_status()
     datos = r.json()
     df = pd.DataFrame(datos["data"] if isinstance(datos, dict) else datos)
-    df["precio"] = df["vwap"].where(df["vwap"] > 0, df["trade"]).where(lambda x: x > 0, df["previousClosingPrice"])
+    if df.empty or "symbol" not in df:
+        raise ValueError("BYMA devolvió el panel vacío (fin de semana, feriado o antes de la apertura)")
+    col = lambda c: pd.to_numeric(df[c], errors="coerce").fillna(0) if c in df else pd.Series(0.0, index=df.index)
+    df["precio"] = col("vwap")                        # precio promedio del día; si no operó: último, cierre o cierre anterior
+    for c in ("trade", "closingPrice", "previousClosingPrice"):
+        df["precio"] = df["precio"].where(df["precio"] > 0, col(c))
     return df.set_index("symbol")
+
+
+def data912_precios():
+    """Último precio operado de cada bono y letra (data912). Lo guarda aunque el mercado esté cerrado."""
+    filas = []
+    for ruta in ("arg_bonds", "arg_notes"):
+        r = requests.get(f"{DATA912}/{ruta}", headers=UA, timeout=(5, 12))
+        r.raise_for_status()
+        filas += r.json()
+    s = pd.Series({x["symbol"]: float(x.get("c") or 0) for x in filas if x.get("symbol")})
+    return s[s > 0]
 
 
 def rem_mensual_bcra(anio, mes):
@@ -91,7 +126,7 @@ def cargar_datos(usar_api=True):
         macro = pd.DataFrame({"ipc": bcra_mensual(27, como="last"), "rem12": bcra_mensual(29, como="last"),
                               "tc": bcra_mensual(5), "badlar": bcra_mensual(7), "base": bcra_mensual(15)})
         d["fuente"]["macro"] = "API BCRA"
-    except Exception as e:
+    except Exception:
         macro = pd.DataFrame({k: pd.Series(dict(v)) for k, v in R["macro"].items()})
         d["fuente"]["macro"] = "respaldo"
     d["macro"] = macro.sort_index()
@@ -107,19 +142,27 @@ def cargar_datos(usar_api=True):
         cer = cer.sort_index()
         d["fuente"]["cer"] = "respaldo"
     d["cer"] = cer
-    # 3) precios de bonos
+    # 3) precios de bonos: BYMA mientras opera el mercado; data912 (último precio) si BYMA tiene el panel vacío; si no, respaldo
     try:
         assert usar_api
         pb24, pbci, leci = byma_panel("public-bonds", "24HS"), byma_panel("public-bonds", "CI"), byma_panel("lebacs", "CI")
+        assert pb24["precio"].get("AL30D", 0) > 0, "panel de BYMA incompleto"
         d["precios_usd"] = pb24["precio"].to_dict()      # incluye tickers D (MEP), C (cable) y en pesos
         d["precios_pesos"] = pd.concat([pbci["precio"], leci["precio"]]).to_dict()
         d["fuente"]["bonos"] = "API BYMA"
     except Exception:
-        pu = {}
-        for t, v in R["bonos_usd"].items():
-            pu[t + "D"], pu[t + "C"], pu[t] = v["mep"], v["ccl"], v["ars"]
-        d["precios_usd"], d["precios_pesos"] = pu, R["pesos"]
-        d["fuente"]["bonos"] = "respaldo"
+        try:
+            assert usar_api
+            px = data912_precios()
+            assert px.get("AL30D", 0) > 0, "data912 sin AL30D"
+            d["precios_usd"] = d["precios_pesos"] = px.to_dict()
+            d["fuente"]["bonos"] = "data912 (último precio)"
+        except Exception:
+            pu = {}
+            for t, v in R["bonos_usd"].items():
+                pu[t + "D"], pu[t + "C"], pu[t] = v["mep"], v["ccl"], v["ars"]
+            d["precios_usd"], d["precios_pesos"] = pu, R["pesos"]
+            d["fuente"]["bonos"] = "respaldo"
     # 4) REM mes a mes
     try:
         assert usar_api
@@ -130,10 +173,11 @@ def cargar_datos(usar_api=True):
     except Exception:
         d["rem_mensual"] = pd.DataFrame(R["rem_mensual"], columns=["mes", "mediana", "p25", "p75", "top10", "n", "nucleo"]).set_index("mes")
         d["fuente"]["rem"] = "respaldo"
-    d["fecha"] = date.today() if d["fuente"]["bonos"] == "API BYMA" else FECHA_ANALISIS
+    d["fecha"] = FECHA_ANALISIS if d["fuente"]["bonos"] == "respaldo" else date.today()
     return d
 
 
+# ── 2. Fechas: 30/360, meses, días hábiles y feriados ──────────────────────────────────────────────────────────
 def d360(a, b):
     """Días entre dos fechas con convención 30/360."""
     d1, d2 = min(a.day, 30), b.day
@@ -149,6 +193,23 @@ def sumar_meses(f, n):
     return date(y, m + 1, min(f.day, calendar.monthrange(y, m + 1)[1]))
 
 
+FERIADOS = {date(2026, 1, 1), date(2026, 2, 16), date(2026, 2, 17), date(2026, 3, 23), date(2026, 3, 24), date(2026, 4, 2),
+            date(2026, 4, 3), date(2026, 5, 1), date(2026, 5, 25), date(2026, 6, 15), date(2026, 7, 9), date(2026, 7, 10),
+            date(2026, 8, 17), date(2026, 10, 12), date(2026, 11, 9), date(2026, 11, 10), date(2026, 11, 23), date(2026, 12, 7), date(2026, 12, 8), date(2026, 12, 25),
+            date(2027, 1, 1), date(2027, 2, 8), date(2027, 2, 9), date(2027, 3, 24), date(2027, 3, 26), date(2027, 4, 2),
+            date(2027, 5, 25), date(2027, 6, 21), date(2027, 7, 9), date(2027, 8, 16), date(2027, 10, 11)}
+habil = lambda f: f.weekday() < 5 and f not in FERIADOS
+
+
+def liquidacion_24hs(f):
+    """Siguiente día hábil (para el plazo de 24 hs)."""
+    f += timedelta(days=1)
+    while f.weekday() >= 5 or f in FERIADOS:
+        f += timedelta(days=1)
+    return f
+
+
+# ── 3. Flujos de fondos de los bonos en dólares ────────────────────────────────────────────────────────────────
 def bono_2020(ticker):
     """Bonares y Globales del canje 2020: pagos 9/1 y 9/7, cupón step-up, amortización según ficha."""
     s = ticker[-2:]
@@ -211,6 +272,7 @@ def universo_usd():
     return u
 
 
+# ── 4. Métricas y curvas: TIR, duración, convexidad, paridad y Nelson-Siegel ───────────────────────────────────
 def metricas_bono(b, liq, precio):
     """TIR, MD, convexidad, valor técnico y paridad. Precio por 100 VN originales (sucio, como cotiza en BYMA)."""
     fl = [(f, c + a) for f, c, a in b["flujos"] if f > liq]
@@ -238,14 +300,6 @@ def ajustar_ns(x, y):
     return res.x
 
 
-def liquidacion_24hs(f):
-    """Siguiente día hábil (para el plazo de 24 hs)."""
-    f += timedelta(days=1)
-    while f.weekday() >= 5 or f in FERIADOS:
-        f += timedelta(days=1)
-    return f
-
-
 def analisis_usd(datos, moneda="mep"):
     """Métricas de cada bono en dólar MEP (tickers D) o cable (tickers C), curvas Nelson-Siegel por legislación y spread contra la curva."""
     usd, liq = universo_usd(), liquidacion_24hs(datos["fecha"])
@@ -261,11 +315,3 @@ def analisis_usd(datos, moneda="mep"):
         tabla.attrs[ley] = [float(v) for v in p]  # parámetros Nelson-Siegel (lista: pandas compara attrs al concatenar)
     tabla["spread_pb"] = (tabla["tir"] - tabla["tir_curva"]) * 1e4
     return tabla, liq, usd
-
-
-FERIADOS = {date(2026, 1, 1), date(2026, 2, 16), date(2026, 2, 17), date(2026, 3, 23), date(2026, 3, 24), date(2026, 4, 2),
-            date(2026, 4, 3), date(2026, 5, 1), date(2026, 5, 25), date(2026, 6, 15), date(2026, 7, 9), date(2026, 7, 10),
-            date(2026, 8, 17), date(2026, 10, 12), date(2026, 11, 9), date(2026, 11, 10), date(2026, 11, 23), date(2026, 12, 7), date(2026, 12, 8), date(2026, 12, 25),
-            date(2027, 1, 1), date(2027, 2, 8), date(2027, 2, 9), date(2027, 3, 24), date(2027, 3, 26), date(2027, 4, 2),
-            date(2027, 5, 25), date(2027, 6, 21), date(2027, 7, 9), date(2027, 8, 16), date(2027, 10, 11)}
-habil = lambda f: f.weekday() < 5 and f not in FERIADOS

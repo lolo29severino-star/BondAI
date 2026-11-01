@@ -1,13 +1,24 @@
 """
-pesos.py — bonos del Tesoro en pesos para la app Bond Analytics (LECAP, BONCAP/BONTE, CER, TAMAR, duales y dólar linked).
+pesos.py — los bonos del Tesoro en pesos: LECAP, BONCAP y BONTE (tasa fija), CER, TAMAR, duales y dólar linked.
 
-Uso desde la app:
+Lo usan: «Tesoro en pesos», «Mi portafolio», «Flujos de fondos» y el informe semanal.
+Idea central: la tasa fija es la vara. Cada otro bono se compara con la curva de tasa fija al mismo plazo: qué inflación (CER),
+qué TAMAR (TAMAR y duales) o qué dólar (dólar linked) lo empata.
+
+Índice
+  1. Calendario: feriados, días hábiles y fechas de pago
+  2. Instrumentos: las condiciones de cada bono (emisión, vencimiento, TEM, CER base, margen TAMAR…)
+  3. Bonos nuevos: registrar_nuevos() agrega los que el Tesoro emite en cada licitación
+  4. Carga de datos: precios de BYMA (o el último de data912 con el mercado cerrado) y CER, TAMAR y A3500 del BCRA
+     (con respaldo del 09/10/2026)
+  5. Matemática: TIR, duración, curvas, conversión de tasas y proyección del CER
+  6. Cálculo principal: calcular() valúa todos los bonos; dolar_esperado_futuros() arma el dólar que esperan los futuros
+  7. Inflación mes a mes que descuenta el mercado (trayectoria_be)
+
+Ejemplo:
     import pesos as P
-    datos = P.cargar(usar_api=True)            # BYMA + BCRA, con respaldo del cierre del 09/10/2026 por partes
-    res = P.calcular(datos, plazo="24HS", tamar=None, infl=None, dev=None)
-    res["lecap"], res["cer"], ...               # DataFrames por tipo de bono
-
-Mismos cálculos que la pestaña "Tesoro en pesos" de la terminal web Bonos HD.
+    datos = P.cargar(usar_api=True)
+    res = P.calcular(datos, plazo="24HS", tamar=None, infl=None, dev=None)   # res["lecap"], res["cer"], res["dl"]…: una tabla por tipo
 """
 import base64
 import json
@@ -24,6 +35,8 @@ from scipy.optimize import brentq
 urllib3.disable_warnings()
 
 BYMA_API = "https://open.bymadata.com.ar/vanoms-be-core/rest/api/bymadata/free"
+DATA912 = "https://data912.com/live"   # último precio operado, para cuando BYMA vacía su panel
+UA = {"User-Agent": "Mozilla/5.0 (Bond Analytics, trabajo académico)"}
 BCRA_API = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias"
 FECHA_RESPALDO = date(2026, 10, 9)
 RESPALDO = json.loads(zlib.decompress(base64.b64decode("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")))  # cierre del 09/10/2026
@@ -35,7 +48,7 @@ TIPOS = [("lecap", "LECAP", "Letras capitalizables a tasa fija"),
          ("dual", "Duales", "Pagan la mejor de dos patas"),
          ("dl", "Dólar linked", "Capital en dólares, pago en pesos al A3500")]
 
-# ── calendario ──
+# ── 1. Calendario: feriados, días hábiles y fechas de pago ─────────────────────────────────────────────────────
 FERIADOS = {date.fromisoformat(f) for f in (
     "2026-01-01 2026-02-16 2026-02-17 2026-03-23 2026-03-24 2026-04-02 2026-04-03 2026-05-01 2026-05-25 2026-06-15 2026-07-09 "
     "2026-07-10 2026-08-17 2026-10-12 2026-11-09 2026-11-10 2026-11-23 2026-12-07 2026-12-08 2026-12-25 2027-01-01 2027-02-08 2027-02-09 2027-03-24 "
@@ -78,7 +91,7 @@ def sumar_meses(f, n):
     return date(y, m, min(f.day, ult))
 
 
-# ── instrumentos ──
+# ── 2. Instrumentos: las condiciones de cada bono ──────────────────────────────────────────────────────────────
 FIJA = [("S16O6", "LECAP", "2026-07-31", "2026-10-16", .0205), ("S30O6", "LECAP", "2025-10-31", "2026-10-30", .0255),
         ("S13N6", "LECAP", "2026-06-30", "2026-11-13", .0210), ("S30N6", "LECAP", "2025-12-15", "2026-11-30", .0230),
         ("S29E7", "LECAP", "2026-08-31", "2027-01-29", .0225), ("T15E7", "BONCAP", "2025-01-31", "2027-01-15", .0205),
@@ -138,7 +151,7 @@ ALIAS = {"TZXD8": ["T2D8X"], "TXMD8": ["TXD8X"], "TZXD6": ["TXD6X"], "TZXM7": ["
 TICKERS = ([f[0] for f in FIJA] + ["TO26", "TY30P"] + [c[0] for c in CERZ] + [b[0] for b in BONCER] + [x[0] for x in LARGOS] + [t[0] for t in TAMAR]
            + [d["t"] for d in DUALES] + [d[0] for d in DL])
 
-# ── bonos nuevos: se agregan solos a las listas de arriba (los lee licitaciones.instrumentos_nuevos) ──
+# ── 3. Bonos nuevos: se agregan solos desde las licitaciones (licitaciones.instrumentos_nuevos) ────────────────
 NUEVOS = {}   # ticker -> condiciones de los bonos que el Tesoro emitió después del respaldo y que se agregaron solos
 
 
@@ -166,7 +179,7 @@ def registrar_nuevos(lista):
     return agregados
 
 
-# ── carga de datos ──
+# ── 4. Carga de datos: BYMA y BCRA, con respaldo ───────────────────────────────────────────────────────────────
 def _bcra(id_var, desde, hasta):
     r = requests.get(f"{BCRA_API}/{id_var}", params={"desde": desde, "hasta": hasta, "Limit": 3000}, timeout=20)
     r.raise_for_status()
@@ -206,14 +219,38 @@ def _precios_byma():
     return out
 
 
+def _precios_data912():
+    """Último precio operado de cada bono en pesos (data912): fines de semana, feriados o antes de la apertura BYMA devuelve
+    el panel vacío. data912 da un solo precio, así que se usa el mismo para contado inmediato y 24 hs."""
+    filas = {}
+    for ruta in ("arg_bonds", "arg_notes"):
+        r = requests.get(f"{DATA912}/{ruta}", headers=UA, timeout=(5, 12))
+        r.raise_for_status()
+        filas.update({x["symbol"]: x for x in r.json() if x.get("symbol")})
+    out = {}
+    for t in TICKERS:
+        x = next((filas[c] for c in [t] + ALIAS.get(t, []) if float((filas.get(c) or {}).get("c") or 0) > 0), None)
+        if x:
+            px, var = float(x["c"]), float(x.get("pct_change") or 0) / 100
+            fila = [px, px, px / (1 + var) if var > -1 else px, x.get("px_bid") or 0, x.get("px_ask") or 0, (x.get("v") or 0) / 1e6, var, x["symbol"]]
+            out[t] = {"t0": fila, "t1": list(fila)}
+    if len(out) < 30:
+        raise RuntimeError("data912 devolvió pocos bonos en pesos")
+    return out
+
+
 def cargar(usar_api=True):
-    """Precios (BYMA), CER, TAMAR y A3500 (BCRA). Si una fuente falla, usa el respaldo del 09/10/2026 para esa parte."""
+    """Precios (BYMA o data912), CER, TAMAR y A3500 (BCRA). Si una fuente falla, usa el respaldo del 09/10/2026 para esa parte."""
     R, hoy, fuente = RESPALDO, date.today(), {}
     try:
         assert usar_api
         px = _precios_byma(); fuente["precios"] = "API BYMA"; fecha = hoy
     except Exception:
-        px = {t: v for t, v in R["px"].items()}; fuente["precios"] = "respaldo"; fecha = FECHA_RESPALDO
+        try:   # mercado cerrado: último precio de data912, para comprar el próximo día hábil
+            assert usar_api
+            px = _precios_data912(); fuente["precios"] = "data912 (último precio)"; fecha = ajustar_pago(hoy)
+        except Exception:
+            px = {t: v for t, v in R["px"].items()}; fuente["precios"] = "respaldo"; fecha = FECHA_RESPALDO
     try:
         assert usar_api
         cer = _bcra(30, "2020-08-01", (hoy + timedelta(days=40)).isoformat()); fuente["cer"] = "API BCRA"
@@ -252,7 +289,7 @@ def _fechas_sem(desde, hasta, m1, m2):
     return sorted(out)
 
 
-# ── matemática ──
+# ── 5. Matemática: TIR, duración, curvas, tasas y CER ──────────────────────────────────────────────────────────
 def _tir(flujos, s, P):
     pv = lambda y: sum(f / (1 + y) ** ((d - s).days / 365) for d, f in flujos if d > s) - P
     try:
@@ -387,7 +424,7 @@ def _proyectar_cer(cer, hasta, ipc):
     return v
 
 
-# ── cálculo principal ──
+# ── 6. Cálculo principal: calcular() valúa todos los bonos ─────────────────────────────────────────────────────
 def dolar_esperado_futuros(tf, spot, fecha_futuros):
     """Dólar oficial (A3500) que esperan los futuros de dólar de A3 para cada fecha.
     tf: tabla de externos.devaluacion_futuros (columnas dias, ajuste y mensual), spot: A3500 del día de los futuros.
@@ -578,7 +615,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
 
     for t, em, v, mg in TAMAR:
         r = q(t)
-        if not r:
+        if not r or ajustar_pago(D(v)) <= s:   # sin precio o ya vencido
             continue
         mg = (margenes or {}).get(t, mg)
         em, v = D(em), D(v); d = (ajustar_pago(v) - s).days; m = mg or 0.0
@@ -594,7 +631,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
     # dólar linked
     for t, em, v in DL:
         r = q(t)
-        if not r:
+        if not r or ajustar_pago(D(v)) <= s:   # sin precio o ya vencido
             continue
         v = D(v); d = (ajustar_pago(v) - s).days
         tcbe = r["precio"] / 100 * (1 + curva_fija(d / 365)) ** (d / 365)
@@ -629,7 +666,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
     # duales
     for b in DUALES:
         r = q(b["t"])
-        if not r:
+        if not r or ajustar_pago(D(b["v"])) <= s:   # sin precio o ya vencido
             continue
         em, v = D(b["em"]), D(b["v"]); d = (ajustar_pago(v) - s).days; n = d360(em, v) / 30
         pb, _, _ = pata_tamar(em, v, b["m"], tamar)
@@ -660,7 +697,7 @@ def calcular(datos, plazo="CI", precio="px", tamar=None, infl=None, ipc_publicad
     return res
 
 
-# ── trayectoria de inflación mensual implícita (como Chamomberg: "breakeven despejado" por tramos) ──
+# ── 7. Inflación mes a mes que descuenta el mercado ────────────────────────────────────────────────────────────
 def _dias_por_mes_ipc(desde, hasta):
     """Días del CER posteriores a 'desde' y hasta 'hasta' que crecen con el IPC de cada mes ('AAAA-MM' -> días)."""
     out, f = {}, pd.Timestamp(desde)
