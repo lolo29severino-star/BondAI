@@ -46,7 +46,7 @@ import mercado as M
 import pesos as P
 import portafolio as PF
 
-st.set_page_config(page_title="Bond Analytics · Renta fija con IA", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Bond Analytics · Renta fija argentina", page_icon="📈", layout="wide")
 
 
 def ver_grafico(fig, destino=None):
@@ -524,7 +524,7 @@ GLOSARIO_PF = {
 
 # a) Opciones de la barra lateral
 st.sidebar.title("Bond Analytics")
-st.sidebar.caption("Terminal de renta fija argentina con IA")
+st.sidebar.caption("Terminal de renta fija argentina")
 en_vivo = st.sidebar.toggle("Datos en vivo (APIs de BYMA y BCRA)", value=True,
                             help="Si una API no responde, se usa el respaldo del 09/10/2026 para esa parte.")
 moneda = st.sidebar.radio("Valuar los bonos en dólares en", ["mep", "ccl"], horizontal=True,
@@ -589,7 +589,7 @@ def dolar_bono(simbolo_usd):
 
 
 # e) Título, datos que usan varias pestañas y los números de arriba
-st.title("Bond Analytics · Renta fija argentina con IA")
+st.title("Bond Analytics · Renta fija argentina")
 tabla_usd, liq_usd = calcular(en_vivo, moneda)
 FUT, F_FUT = cargar_futuros(en_vivo)
 RIESGO, F_RIESGO = cargar_riesgo(en_vivo)
@@ -1517,7 +1517,6 @@ with tab4:
         clave_guardada = ""
     if clave_guardada:
         os.environ["ANTHROPIC_API_KEY"] = clave_guardada
-        st.caption("Clave de Anthropic cargada desde los Secrets de la app: el texto lo redacta Claude.")
         clave = ""
     else:
         clave = st.text_input("ANTHROPIC_API_KEY (opcional)", type="password", help="Sin clave se usa una plantilla determinística con los mismos números.")
