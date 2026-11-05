@@ -1,18 +1,22 @@
 """
-portafolio.py — tu propia cartera de bonos para la app Bond Analytics.
+portafolio.py — tu propia cartera de bonos.
 
-Cargás bonos y nominales y la app calcula: valor de mercado, duración modificada, DV01, convexidad, key rate durations (KRD),
-escenarios de tasas con revaluación completa de los flujos, VaR histórico y qué tipo de cartera es (bullet, barbell o ladder).
+Lo usan: «Mi portafolio» y el informe semanal (cómo le fue a tu cartera en la semana).
+Cada grupo se mueve con su propia tasa: hard dollar y ONs con la TIR en dólares, tasa fija con la TIREA en pesos, CER con la TIR
+real y dólar linked con la TIR en dólares oficiales. TAMAR y duales llevan duración casi nula: su tasa acompaña a las del mercado.
 
-Uso desde la app:
+Índice
+  1. Universo de bonos: la ficha de cada bono que se puede cargar (precio, tasa y flujos) y la cartera con valor, peso, duración,
+     DV01, convexidad y key rate durations (universo, agregar_ons, analitica, cartera, resumen, krd_cartera)
+  2. Tipo de cartera: bullet, barbell o ladder según cómo se reparten los vencimientos
+  3. Escenarios de tasas: revaluación completa de los flujos contra la aproximación lineal y por duración + convexidad
+  4. Históricos y VaR: cierres diarios de BYMA, retornos con cupones y VaR histórico con expected shortfall
+
+Ejemplo:
     import portafolio as PF
-    U = PF.universo(tabla_usd, liq_usd, RP, tc=mep)                    # ficha de cada bono: precio, TIR, flujos
-    C = PF.cartera(U, {"AL30": 10_000, "S30N6": 100_000}, "ARS", mep)  # una fila por bono con valor, peso, MD, KRD...
-    PF.tipo_cartera(C), PF.escenario(U, C, shocks), PF.var_historico(R, C["valor"])
-
-Cada grupo se mueve con su propia curva y su propia tasa: hard dollar con la TIR en dólares, tasa fija con la TIREA nominal en
-pesos, CER con la TIR real y dólar linked con la TIR en dólares oficiales. TAMAR y duales llevan duración efectiva casi nula:
-la TAMAR futura acompaña a las tasas, así que su riesgo no es la tasa sino el margen.
+    U = PF.universo(tabla_usd, liq_usd, RP, tc=mep)                    # ficha de cada bono
+    C = PF.cartera(U, {"AL30": 10_000, "S30N6": 100_000}, "ARS", mep)  # una fila por bono
+    PF.resumen(C), PF.tipo_cartera(C), PF.var_historico(R, C["valor"])
 """
 import base64
 import json
@@ -46,7 +50,7 @@ EJEMPLO = {"AL30": 10_000, "GD35": 3_000, "AE38": 3_000, "S30N6": 3_000_000, "T3
            "D31M7": 1_500, "TTD26": 1_500_000, "MGCO": 3_000}
 
 
-# ───────────────────────────── universo de bonos ─────────────────────────────
+# ── 1. Universo de bonos y la cartera ──────────────────────────────────────────────────────────────────────────
 def universo(tabla_usd, liq_usd, RP, tc, moneda="mep"):
     """Ficha de cada bono: grupo, precio (en su moneda de cotización y en pesos), tasa, flujos [(años, monto)] en las mismas
     unidades que el precio con el que se calcula la tasa, vencimiento y el símbolo de BYMA para el histórico.
@@ -167,7 +171,7 @@ def krd_cartera(C):
     return K
 
 
-# ───────────────────────────── tipo de cartera ─────────────────────────────
+# ── 2. Tipo de cartera: bullet, barbell o ladder ───────────────────────────────────────────────────────────────
 def tipo_cartera(C):
     """Bullet, barbell o ladder según cómo se reparte el valor entre plazos de vencimiento."""
     w, t = C["peso"].values, C["anios"].values
@@ -195,7 +199,7 @@ def tipo_cartera(C):
                 ocupados=ocupados, mayor_tramo=mayor)
 
 
-# ───────────────────────────── escenarios de tasas ─────────────────────────────
+# ── 3. Escenarios de tasas ─────────────────────────────────────────────────────────────────────────────────────
 def forma_escenario(nombre, magnitud=100):
     """Shock en pb para cada nodo de la curva."""
     z = (np.log(NODOS) - np.log(NODOS).mean()) / (np.log(NODOS).max() - np.log(NODOS).mean())  # -1 en el corto, +1 en el largo
@@ -255,7 +259,7 @@ def paralelos(U, C, saltos=(-1000, -500, -100, 100, 500, 1000)):
     return pd.DataFrame(filas).set_index("salto")
 
 
-# ───────────────────────────── históricos y VaR ─────────────────────────────
+# ── 4. Históricos y VaR ────────────────────────────────────────────────────────────────────────────────────────
 def _historico(sesion, simbolo, desde, hasta):
     ts = lambda d: int(datetime(d.year, d.month, d.day, tzinfo=timezone(timedelta(hours=-3))).timestamp())
     r = sesion.get(f"{BYMA_API}/chart/historical-series/history", params={"symbol": simbolo + " 24HS", "resolution": "D",

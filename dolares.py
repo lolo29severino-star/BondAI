@@ -1,16 +1,18 @@
 """
-dolares.py — series diarias del dólar MEP, cable, A3500 y minorista (las usa el informe semanal y, si el panel del día todavía no
-tiene precios, el MEP de referencia de la app).
+dolares.py — series diarias del dólar MEP, cable, A3500 y minorista.
 
-Uso desde la app:
-    import dolares as DL
-    df = DL.cargar_dolares(usar_api=True)       # cierres diarios de BYMA (AL30, GD30 y sus D y C) y A3500 / minorista del BCRA
-    s = DL.series(df, "al30")                   # MEP, cable, canje y brechas por día
+Lo usan: el informe semanal (cómo se movieron el MEP, el cable, el oficial y la brecha) y la app, como dólar MEP de respaldo si
+el panel del día todavía no tiene precios.
 
-Definiciones (las mismas de la terminal web Bonos HD):
+Definiciones:
     MEP   = precio del bono en pesos / precio en dólares MEP (ticker terminado en D)
     cable = precio en pesos / precio en dólares cable (ticker terminado en C)
     canje = cable / MEP − 1        brecha = dólar financiero / A3500 − 1
+
+Ejemplo:
+    import dolares as DL
+    df = DL.cargar_dolares(usar_api=True)       # cierres diarios de BYMA (AL30, GD30 y sus D y C) y A3500 / minorista del BCRA
+    s = DL.series(df, "al30")                   # MEP, cable, canje y brechas por día
 """
 import base64
 import json

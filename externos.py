@@ -1,16 +1,20 @@
 """
-externos.py — datos de otras fuentes para la app Bond Analytics: futuros de dólar (A3 Mercados, ex Matba Rofex), riesgo país
-(ArgentinaDatos, EMBI de JP Morgan), curva del Tesoro de EE.UU. y obligaciones negociables (data912).
+externos.py — datos de otras fuentes: futuros de dólar, riesgo país, Tesoro de EE.UU. y obligaciones negociables (ONs).
 
-Uso desde la app:
-    import externos as X
-    fut = X.cargar_futuros(usar_api=True)        # ajustes de los futuros DLR de A3 del último día disponible
-    tabla = X.devaluacion_futuros(fut, a3500)    # devaluación implícita, TNA, TEA, mensual y forward entre contratos
-    rp = X.cargar_riesgo_pais(usar_api=True)     # serie diaria en puntos básicos desde 1999
-    ust = X.cargar_ust(usar_api=True)            # curva par del Tesoro de EE.UU. del último día
-    ons = X.cargar_ons(usar_api=True)            # precios de todas las ON en pesos, MEP y cable
+Lo usan: el encabezado (riesgo país), «ONs», «Tesoro en pesos» (dólar linked), «Mi portafolio», «Flujos de fondos» y el informe.
+
+Índice
+  1. Futuros de dólar de A3 Mercados: cargar_futuros, devaluacion_futuros, futuro_en
+  2. Riesgo país (ArgentinaDatos, EMBI de JP Morgan) y curva del Tesoro de EE.UU.: cargar_riesgo_pais, cargar_ust, spread_ust
+  3. Obligaciones negociables: precios de data912 (cargar_ons, tabla_ons), ficha técnica de BYMA (cargar_fichas, emisor) y
+     flujos, TIR y duración de cada ON (flujos_on, tir_on, ons_calculables)
 
 Si una API no responde se usa el respaldo (futuros, riesgo país y Tesoro de EE.UU. al 09/10/2026; ONs al 19/10/2026).
+
+Ejemplo:
+    import externos as X
+    fut, fuente = X.cargar_futuros(usar_api=True)    # ajustes de los futuros de dólar del último día
+    ons, fuente = X.cargar_ons(usar_api=True)        # precios de todas las ONs en pesos, MEP y cable
 """
 import base64
 import io
@@ -39,7 +43,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Bond Analytics, trabajo académico)"}
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
-# ───────────────────────────── futuros de dólar (A3) ─────────────────────────────
+# ── 1. Futuros de dólar (A3 Mercados) ──────────────────────────────────────────────────────────────────────────
 def ultimo_habil(anio, mes):
     """Último día hábil del mes: vencimiento de los futuros de dólar de A3."""
     f = (date(anio + (mes == 12), mes % 12 + 1, 1) - timedelta(days=1))
@@ -109,7 +113,7 @@ def ultimo_dia(f):
     return date(f.year + (f.month == 12), f.month % 12 + 1, 1) - timedelta(days=1)
 
 
-# ───────────────────────────── riesgo país y Tesoro de EE.UU. ─────────────────────────────
+# ── 2. Riesgo país y Tesoro de EE.UU. ──────────────────────────────────────────────────────────────────────────
 def cargar_riesgo_pais(usar_api=True):
     """Riesgo país (EMBI de JP Morgan, puntos básicos), serie diaria. Devuelve (Serie, fuente)."""
     if usar_api:
@@ -166,7 +170,7 @@ def spread_ust(tabla_usd, curva):
     return t
 
 
-# ───────────────────────────── obligaciones negociables (data912) ─────────────────────────────
+# ── 3. Obligaciones negociables: precios (data912), fichas (BYMA), flujos y TIR ────────────────────────────────
 # ── emisores y condiciones de cada ON: ficha técnica de BYMA (respaldo del 20/10/2026 para los 293 tickers de data912) ──
 FICHAS = {k: v for k, v in RESPALDO["fichas"].items() if not k.startswith("_")}
 # [emisor, vencimiento, emisión, moneda, tasa anual %, "v" si es variable, pagos por año, cuotas de capital, clase]

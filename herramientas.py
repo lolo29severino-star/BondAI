@@ -1,16 +1,17 @@
 """
-herramientas.py — tres herramientas de Bond Analytics que se apoyan en los cálculos de los otros módulos.
+herramientas.py — tres herramientas que combinan cálculos de los otros módulos.
 
-  1. Fichas de las ONs de los grandes emisores y su curva contra la de los soberanos   → spread_ons, EMISORES_TOP   (pestaña «ONs»)
-  2. Retorno de los bonos en dólares hasta una fecha según la TIR a la que se venda      → retorno_hasta, tabla_retornos   (pestaña «Curva en dólares»)
-  3. Tu cartera contra un índice de bonos                                                → comparar_indice   (pestaña «Mi portafolio»)
+Índice
+  1. ONs de los grandes emisores contra la curva de los Globales      → spread_ons, EMISORES_TOP       (pestaña «ONs»)
+  2. Retorno de los bonos en dólares según la TIR a la que se vendan   → retorno_hasta, tabla_retornos  (pestaña «Curva en dólares»)
+  3. Tu cartera contra un índice de bonos                             → comparar_indice                (pestaña «Mi portafolio»)
 """
 import numpy as np
 import pandas as pd
 
 import bondai as B
 
-# ───────────────────────────── 1. ONs de los grandes emisores ─────────────────────────────
+# ── 1. ONs de los grandes emisores ─────────────────────────────────────────────────────────────────────────────
 EMISORES_TOP = ["YPF", "Pampa Energía", "Vista Energy", "Telecom", "IRSA", "Pan American Energy"]
 
 
@@ -28,7 +29,7 @@ def spread_ons(ON, tabla_usd):
     return out
 
 
-# ───────────────────────────── 2. retornos de los bonos en dólares ─────────────────────────────
+# ── 2. Retornos de los bonos en dólares ────────────────────────────────────────────────────────────────────────
 def precio_a_tir(b, fecha, tir):
     """Precio sucio por 100 VN originales en 'fecha' si el mercado exige 'tir' (efectiva anual): flujos posteriores descontados."""
     fl = [((f - fecha).days / 365, c + a) for f, c, a in b["flujos"] if f > fecha]
@@ -60,7 +61,7 @@ def tabla_retornos(tabla_usd, liq, horizonte, escenarios, modo="pb"):
     return pd.DataFrame(filas).set_index("ticker")
 
 
-# ───────────────────────────── 3. cartera contra un índice ─────────────────────────────
+# ── 3. Cartera contra un índice ────────────────────────────────────────────────────────────────────────────────
 def comparar_indice(rc, ri):
     """rc, ri: retornos diarios de la cartera y del índice (mismo índice de fechas). Devuelve (acumulados, estadísticas)."""
     df = pd.DataFrame({"cartera": rc, "indice": ri}).dropna()

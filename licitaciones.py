@@ -1,21 +1,21 @@
 """
-licitaciones.py — licitaciones del Tesoro (premio contra el mercado secundario) y calendario de licitaciones, pagos y
-vencimientos. Los usa el informe semanal: la licitación de la semana y la agenda de las dos semanas siguientes.
+licitaciones.py — las licitaciones del Tesoro y el calendario de pagos.
 
-Uso desde la app:
+Lo usan: el informe semanal (la licitación de la semana y la agenda de las dos semanas siguientes) y la app al arrancar, para
+agregar solos los bonos nuevos (instrumentos_nuevos → pesos.registrar_nuevos).
+
+Índice
+  1. Resultados de las licitaciones: el respaldo de 2026 (hasta la del 14/10/2026) y la próxima licitación
+  2. Actualización automática: lee la página de noticias de la Secretaría de Finanzas, abre cada «Resultado de la licitación»
+     nuevo, identifica cada instrumento y calcula el premio = TIREA de corte − TIREA del mercado secundario (cierre de BYMA);
+     también lee el último «Llamado a licitación» y las condiciones de los bonos nuevos
+  3. Calendario: licitaciones, cortes de cupón, pagos de renta, amortizaciones y vencimientos del Tesoro y de las ONs
+
+Ejemplo:
     import licitaciones as L
-    sub, col, prox, info = L.actualizar(en_vivo, cer, tamar, a3500)   # respaldo + licitaciones nuevas leídas solas de Finanzas
-    ev = L.eventos(date(2026, 10, 1), date(2027, 3, 31))                # calendario: licitaciones, cortes, rentas, amortizaciones, feriados
-
-Actualización automática: en vivo, actualizar() lee la página de noticias de la Secretaría de Finanzas
-(argentina.gob.ar/economia/finanzas/noticias), abre cada «Resultado de la licitación» posterior al respaldo, lee sus tablas
-(instrumento, VNO ofertado y adjudicado, valor efectivo, precio de corte, TIREA) y calcula el premio contra el cierre de BYMA del día
-de la licitación; también lee el último «Llamado a licitación» para mostrar el menú de la próxima. Si algo falla, queda el respaldo.
-
-El premio es la TIREA de corte menos la TIREA del secundario (BYMA, cierre de 24 hs del día de la licitación), las dos con el mismo
-método (el respaldo se armó con data/build_licitaciones.js y se validó contra este código en Python). Fuentes: comunicados
-«Resultado de la licitación» de la Secretaría de Finanzas y planilla «Colocaciones de deuda»; cronograma 2026 y feriados bancarios
-del BCRA. Respaldo con las licitaciones de 2026 hasta la del 14/10/2026.
+    sub, col, prox, info = L.actualizar(en_vivo, cer, tamar, a3500)   # respaldo + licitaciones nuevas
+    nuevos = L.instrumentos_nuevos(True)                               # condiciones de los bonos que todavía no están en pesos.py
+    ev = L.eventos(date(2026, 10, 1), date(2027, 3, 31))                # calendario de pagos
 """
 import base64
 import html as _html
@@ -54,7 +54,7 @@ def anterior_habil(f):
     return f
 
 
-# ───────────────────────────── resultados de las licitaciones ─────────────────────────────
+# ── 1. Resultados de las licitaciones (respaldo) y la próxima ──────────────────────────────────────────────────
 def resultados():
     """(subastas, colocaciones). Subastas: una fila por licitación (ofertado y adjudicado en billones de pesos).
     Colocaciones: una fila por instrumento con precio de corte, TIREA de corte, TIREA del secundario, premio (pb y % del precio)
@@ -96,7 +96,7 @@ def proxima(hoy=None, prox=None):
     return prox
 
 
-# ───────────────────────────── actualización automática (Secretaría de Finanzas + BYMA) ─────────────────────────────
+# ── 2. Actualización automática: Secretaría de Finanzas + BYMA ─────────────────────────────────────────────────
 GOB = "https://www.argentina.gob.ar"
 LISTADO = GOB + "/economia/finanzas/noticias"
 BYMA_API = "https://open.bymadata.com.ar/vanoms-be-core/rest/api/bymadata/free"
@@ -569,7 +569,7 @@ def actualizar(usar_api, cer, tamar, a3500, hoy=None):
     return sub.drop_duplicates(subset=["f"]).sort_values("f"), col, proxima(hoy, prox), info
 
 
-# ───────────────────────────── calendario ─────────────────────────────
+# ── 3. Calendario: licitaciones, pagos y vencimientos ──────────────────────────────────────────────────────────
 def _bopreales():
     """Flujos de los Bopreales (BCRA) por 100 VN: Serie 1 (A a D) 5% semestral, amortiza 50% en abr-27 y 50% en oct-27;
     Serie 4 (A y B) 3% semestral, amortiza al vencimiento (oct-28)."""

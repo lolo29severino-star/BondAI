@@ -1,25 +1,24 @@
 """
-informe.py — informe semanal de renta fija argentina en PDF, para la pestaña «Informe semanal con IA» de Bond Analytics.
+informe.py — el informe semanal en PDF de la pestaña «Informe semanal con IA».
 
-Qué hace:
-  1. Baja los cierres diarios de BYMA (24 hs) de las últimas semanas de cada bono (o usa el respaldo del 09/10/2026).
-  2. Toma la última rueda disponible y la de una semana antes, y calcula para cada bono la variación del precio y de su tasa
-     (TIR en dólares para Bonares, Globales y Tesoro USD; TIREA para LECAP y BONCAP; TIR real para los CER cupón cero).
-  3. Suma el riesgo país, los dólares (MEP, cable, A3500 y brecha), la TAMAR, la licitación de la semana, el dólar futuro, la
-     inflación breakeven, las ONs de los grandes emisores y la agenda de las dos semanas siguientes.
-  4. Si hay un portafolio cargado en «Mi portafolio», calcula cómo le fue en la semana (retorno, aporte de cada bono, precios) y
-     sus indicadores: duración, DV01, convexidad, tipo de cartera, exposición y VaR (contexto_portafolio).
-  5. Un LLM (Claude) redacta el resumen usando SOLO esos números, para alguien que no sabe de finanzas: frases cortas, pocos números
-     y cada término explicado. Sin clave se usa una plantilla que sigue las mismas reglas.
-  6. Arma un PDF fácil de leer: tarjetas con los números de la semana, el resumen con títulos, gráficos con «cómo leerlo», tu
-     portafolio y un anexo con las tablas.
+Reparto de tareas: Python calcula todos los números y el modelo de lenguaje (Claude) solo los redacta.
 
-Uso desde la app:
+Índice
+  1. Datos de la semana: cierres diarios de BYMA de cada bono, la última rueda contra la de una semana antes (precio y tasa) y
+     el contexto con riesgo país, dólares, TAMAR y licitación (semana)
+  2. Lo que suma la app: ONs de los grandes emisores, agenda de las dos semanas siguientes y tu portafolio (retorno, aporte de
+     cada bono, indicadores y cuánto explican las tasas)
+  3. Texto: el JSON va a Claude con instrucciones de escribir para alguien que no sabe de finanzas (redactar); sin clave, una
+     plantilla con las mismas reglas (plantilla)
+  4. Gráficos: riesgo país, curva en dólares, tasa fija y los bonos que más se movieron
+  5. PDF: tarjetas con los números clave, el texto con títulos, los gráficos, tu portafolio y un anexo con las tablas (reportlab)
+
+Ejemplo:
     import informe as I
-    S = I.semana(usar_api, cer, tamar, riesgo, dolares, licitaciones, extra)   # números de la semana
-    ctx = {**S["contexto"], "portafolio": I.contexto_portafolio(C, R, H, U, S["ini"], S["fin"])}   # (opcional) tu cartera
-    texto, origen = I.redactar(ctx)                                            # Claude o plantilla
-    pdf = I.pdf(S, texto, origen, ctx)                                         # bytes del PDF
+    S = I.semana(usar_api, cer, tamar, riesgo, dolares, licitaciones)                       # números de la semana
+    ctx = {**S["contexto"], "portafolio": I.contexto_portafolio(C, R, H, U, S["ini"], S["fin"])}
+    texto, origen = I.redactar(ctx)                                                       # Claude o plantilla
+    pdf = I.pdf(S, texto, origen, ctx)                                                    # bytes del PDF
 """
 import io
 import json
@@ -42,7 +41,7 @@ AZUL, ROJO, VERDE, GRIS, VIOLETA = "#2a78d6", "#d64545", "#1baf7a", "#8a96aa", "
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
 
-# ───────────────────────────── datos ─────────────────────────────
+# ── 1. Datos de la semana ──────────────────────────────────────────────────────────────────────────────────────
 def instrumentos():
     """{ticker: (grupo, símbolo en BYMA)}: los bonos en dólares se miden en dólar MEP (símbolo terminado en D)."""
     out = {}
@@ -256,7 +255,7 @@ def semana(usar_api, cer, tamar, riesgo, dolares, licitaciones=None, extra=None,
             "riesgo": riesgo, "fuente_precios": ctx["semana"]["precios"]}
 
 
-# ───────────────────────────── lo que se sumó: ONs de los grandes emisores, agenda y tu portafolio ─────────────────────────────
+# ── 2. Lo que suma la app: ONs, agenda y tu portafolio ─────────────────────────────────────────────────────────
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 _r = lambda v, d=2: None if v is None or not np.isfinite(v) else round(float(v), d)
 
@@ -393,7 +392,7 @@ def _para_llm(ctx):
     return limpio(ctx)
 
 
-# ───────────────────────────── texto ─────────────────────────────
+# ── 3. Texto: Claude o la plantilla ────────────────────────────────────────────────────────────────────────────
 # Para quien no sabe de finanzas: frases cortas, pocos números por párrafo y cada término explicado la primera vez.
 PROMPT = ("Sos analista de renta fija en Argentina y escribís un informe semanal para personas que NO saben de finanzas: tiene que leerse "
           "fácil y de corrido. Español rioplatense, claro y cálido, con frases cortas. Usás SOLO los números del JSON (no inventes datos ni "
@@ -609,7 +608,7 @@ def plantilla(c):
     return "\n\n".join(p)
 
 
-# ───────────────────────────── gráficos ─────────────────────────────
+# ── 4. Gráficos ────────────────────────────────────────────────────────────────────────────────────────────────
 def _png(fig, dpi=150):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
@@ -678,7 +677,7 @@ def graficos(S):
     return out
 
 
-# ───────────────────────────── PDF ─────────────────────────────
+# ── 5. PDF ─────────────────────────────────────────────────────────────────────────────────────────────────────
 def _limpio(s):
     """Texto seguro para reportlab (escapa < > & y reemplaza símbolos que la fuente Helvetica no tiene)."""
     s = str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
