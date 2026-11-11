@@ -9,10 +9,6 @@ Definiciones:
     cable = precio en pesos / precio en dólares cable (ticker terminado en C)
     canje = cable / MEP − 1        brecha = dólar financiero / A3500 − 1
 
-Ejemplo:
-    import dolares as DL
-    df = DL.cargar_dolares(usar_api=True)       # cierres diarios de BYMA (AL30, GD30 y sus D y C) y A3500 / minorista del BCRA
-    s = DL.series(df, "al30")                   # MEP, cable, canje y brechas por día
 """
 import base64
 import json
