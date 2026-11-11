@@ -12,11 +12,6 @@ real y dólar linked con la TIR en dólares oficiales. TAMAR y duales llevan dur
   3. Escenarios de tasas: revaluación completa de los flujos contra la aproximación lineal y por duración + convexidad
   4. Históricos y VaR: cierres diarios de BYMA, retornos con cupones y VaR histórico con expected shortfall
 
-Ejemplo:
-    import portafolio as PF
-    U = PF.universo(tabla_usd, liq_usd, RP, tc=mep)                    # ficha de cada bono
-    C = PF.cartera(U, {"AL30": 10_000, "S30N6": 100_000}, "ARS", mep)  # una fila por bono
-    PF.resumen(C), PF.tipo_cartera(C), PF.var_historico(R, C["valor"])
 """
 import base64
 import json
