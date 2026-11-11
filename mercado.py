@@ -9,10 +9,6 @@ pesos» (qué bonos rinden más o menos que el resto de su curva).
      (y si nada responde, el respaldo del cierre del 09/10/2026)
   2. Ajuste de curvas: ajustar_curva() elige la mejor curva (logarítmica, raíz, lineal o Nelson-Siegel) según el criterio de Akaike
 
-Ejemplo:
-    import mercado as M
-    pan = M.cargar_paneles(usar_api=True)
-    f, nombre, desvio = M.ajustar_curva(dias, tasas)
 """
 import base64
 import json
