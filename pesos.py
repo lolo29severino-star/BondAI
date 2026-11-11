@@ -15,10 +15,6 @@ qué TAMAR (TAMAR y duales) o qué dólar (dólar linked) lo empata.
   6. Cálculo principal: calcular() valúa todos los bonos; dolar_esperado_futuros() arma el dólar que esperan los futuros
   7. Inflación mes a mes que descuenta el mercado (trayectoria_be)
 
-Ejemplo:
-    import pesos as P
-    datos = P.cargar(usar_api=True)
-    res = P.calcular(datos, plazo="24HS", tamar=None, infl=None, dev=None)   # res["lecap"], res["cer"], res["dl"]…: una tabla por tipo
 """
 import base64
 import json
