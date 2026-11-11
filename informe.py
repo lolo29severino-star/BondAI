@@ -13,12 +13,6 @@ Reparto de tareas: Python calcula todos los números y el modelo de lenguaje (Cl
   4. Gráficos: riesgo país, curva en dólares, tasa fija y los bonos que más se movieron
   5. PDF: tarjetas con los números clave, el texto con títulos, los gráficos, tu portafolio y un anexo con las tablas (reportlab)
 
-Ejemplo:
-    import informe as I
-    S = I.semana(usar_api, cer, tamar, riesgo, dolares, licitaciones)                       # números de la semana
-    ctx = {**S["contexto"], "portafolio": I.contexto_portafolio(C, R, H, U, S["ini"], S["fin"])}
-    texto, origen = I.redactar(ctx)                                                       # Claude o plantilla
-    pdf = I.pdf(S, texto, origen, ctx)                                                    # bytes del PDF
 """
 import io
 import json
