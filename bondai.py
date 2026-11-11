@@ -10,10 +10,6 @@ Lo usan: la pestaña «Curva en dólares» y, a través de ella, «Mi portafolio
   3. Flujos de fondos: cupones y amortizaciones de cada Bonar, Global y bono del Tesoro en dólares
   4. Métricas y curvas: TIR, duración, convexidad, valor técnico, paridad y curva Nelson-Siegel por legislación
 
-Ejemplo:
-    import bondai as B
-    D = B.cargar_datos(usar_api=True)                 # precios, CER, IPC, tipo de cambio y REM
-    tabla, liq, bonos = B.analisis_usd(D, "mep")      # una fila por bono con TIR, MD, convexidad, paridad y spread
 """
 import base64
 import json
