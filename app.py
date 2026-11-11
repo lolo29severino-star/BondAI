@@ -1,11 +1,4 @@
 """
-app.py — la aplicación web de Bond Analytics, hecha con Streamlit.
-
-Cómo funciona: Streamlit ejecuta este archivo de arriba abajo cada vez que el usuario toca algo (un botón, una opción). Por eso
-todo lo que baja datos o hace cuentas pesadas está en funciones con caché (sección 2): se calcula una vez y se reusa. La app no
-hace cuentas financieras por su cuenta: llama a los módulos (bondai, pesos, externos, portafolio, informe…) y muestra lo que
-devuelven en tablas, métricas y gráficos.
-
 Índice
    1. Encabezado: librerías, módulos propios y configuración de la página
    2. Datos: las funciones que bajan y calculan, con caché
@@ -19,8 +12,6 @@ devuelven en tablas, métricas y gráficos.
   10. Pestaña «Flujos de fondos»        → los flujos de cada bono (bondai, pesos y externos)
   11. Pestaña «Informe semanal con IA»  → informe (semana, contexto_portafolio, redactar con Claude y pdf)
 
-Ejecutar en la compu: pip install -r requirements.txt → streamlit run app.py
-Publicada en internet con GitHub + Streamlit Community Cloud (ver README.md). Todos los módulos tienen que estar en la misma carpeta.
 """
 
 # ── 1. Encabezado: librerías, módulos propios y configuración de la página ───────────────────────────────────
