@@ -11,11 +11,6 @@ agregar solos los bonos nuevos (instrumentos_nuevos → pesos.registrar_nuevos).
      también lee el último «Llamado a licitación» y las condiciones de los bonos nuevos
   3. Calendario: licitaciones, cortes de cupón, pagos de renta, amortizaciones y vencimientos del Tesoro y de las ONs
 
-Ejemplo:
-    import licitaciones as L
-    sub, col, prox, info = L.actualizar(en_vivo, cer, tamar, a3500)   # respaldo + licitaciones nuevas
-    nuevos = L.instrumentos_nuevos(True)                               # condiciones de los bonos que todavía no están en pesos.py
-    ev = L.eventos(date(2026, 10, 1), date(2027, 3, 31))                # calendario de pagos
 """
 import base64
 import html as _html
