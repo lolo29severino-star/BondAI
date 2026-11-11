@@ -11,10 +11,6 @@ Lo usan: el encabezado (riesgo país), «ONs», «Tesoro en pesos» (dólar link
 
 Si una API no responde se usa el respaldo (futuros, riesgo país y Tesoro de EE.UU. al 09/10/2026; ONs al 19/10/2026).
 
-Ejemplo:
-    import externos as X
-    fut, fuente = X.cargar_futuros(usar_api=True)    # ajustes de los futuros de dólar del último día
-    ons, fuente = X.cargar_ons(usar_api=True)        # precios de todas las ONs en pesos, MEP y cable
 """
 import base64
 import io
