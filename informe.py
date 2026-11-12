@@ -421,7 +421,7 @@ def redactar(ctx, modelo="claude-sonnet-5-5"):
         try:
             import anthropic
             msj = anthropic.Anthropic(api_key=clave).messages.create(
-                model=modelo, max_tokens=4000, system=PROMPT,
+                model=modelo, max_tokens=8000, system=PROMPT, thinking={"type": "between_tools"},
                 messages=[{"role": "user", "content": "Datos de la semana (JSON):\n" + json.dumps(_para_llm(ctx), ensure_ascii=False)}])
             texto = texto_de(msj)
             if not texto:
